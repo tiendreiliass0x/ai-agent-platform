@@ -11,6 +11,9 @@ from app.services.database_service import db_service
 from app.services.document_processor import DocumentProcessor
 from app.services.gemini_service import gemini_service
 from app.services.web_search_service import web_search_service
+from app.core.logging_config import get_logger, LoggerMixin
+
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -37,7 +40,7 @@ class GroundedResponse:
     web_search_used: bool = False
 
 
-class DomainExpertiseService:
+class DomainExpertiseService(LoggerMixin):
     """Orchestrates domain expertise with personas, knowledge packs, and web search"""
 
     def __init__(self):
@@ -210,34 +213,53 @@ class DomainExpertiseService:
         self,
         message: str,
         site_whitelist: List[str] = None,
-        context: Dict[str, Any] = None
+        context: Dict[str, Any] = None,
+        agent_id: Optional[int] = None
     ) -> List[RetrievalCandidate]:
         """Perform controlled web search"""
 
         try:
+            self.log_info(
+                "Starting web search",
+                message=message[:100],
+                site_whitelist=site_whitelist,
+                agent_id=agent_id
+            )
+
             results = await web_search_service.search(
                 query=message,
                 site_whitelist=site_whitelist,
                 max_results=5,
-                timeout_seconds=8
+                timeout_seconds=8,
+                agent_id=agent_id
             )
 
             candidates = []
             for result in results:
                 candidates.append(RetrievalCandidate(
-                    doc_id=f"web_{result['url']}",
-                    content=result['snippet'],
+                    doc_id=f"web_{result.url}",
+                    content=result.snippet,
                     score=0.7,  # Web results get medium score
-                    source_url=result['url'],
-                    doc_title=result['title'],
+                    source_url=result.url,
+                    doc_title=result.title,
                     timestamp=datetime.now(),
                     source_type="web"
                 ))
 
+            self.log_info(
+                "Web search completed",
+                results_count=len(candidates),
+                agent_id=agent_id
+            )
             return candidates
 
         except Exception as e:
-            print(f"Web search failed: {e}")
+            self.log_error(
+                "Web search failed",
+                error=str(e),
+                message=message[:100],
+                agent_id=agent_id
+            )
             return []
 
     def _merge_and_rerank(

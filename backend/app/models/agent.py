@@ -36,7 +36,7 @@ class Agent(Base):
     knowledge_pack_id = Column(Integer, ForeignKey("knowledge_packs.id"), nullable=True)
 
     # Tool and Grounding Configuration
-    tool_policy = Column(JSON, default={
+    tool_policy = Column(JSON, default=lambda: {
         "web_search": False,
         "site_search": [],
         "code_exec": False
@@ -44,8 +44,8 @@ class Agent(Base):
     grounding_mode = Column(String, default="blended")  # "strict" or "blended"
 
     # Configuration
-    config = Column(JSON, default={})  # Model settings, temperature, etc.
-    widget_config = Column(JSON, default={})  # Widget appearance, position, etc.
+    config = Column(JSON, default=dict)  # Model settings, temperature, etc.
+    widget_config = Column(JSON, default=dict)  # Widget appearance, position, etc.
 
     # Owner and Organization
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)  # Created by user

@@ -21,9 +21,9 @@ class Persona(Base):
     system_prompt = Column(Text, nullable=False)  # Base role prompt
 
     # Behavior Configuration
-    tactics = Column(JSON, nullable=False, default={})  # {"style":"executive", "steps":[...]}
-    communication_style = Column(JSON, default={})     # Tone, formality, depth
-    response_patterns = Column(JSON, default={})       # How they structure responses
+    tactics = Column(JSON, nullable=False, default=dict)  # {"style":"executive", "steps":[...]}
+    communication_style = Column(JSON, default=dict)     # Tone, formality, depth
+    response_patterns = Column(JSON, default=dict)       # How they structure responses
 
     # Built-in vs Custom
     is_built_in = Column(String, default=False)  # True for our templates
@@ -56,7 +56,7 @@ class KnowledgePack(Base):
     grounding_mode = Column(String, default="blended")  # "strict" or "blended"
 
     # Freshness Policy
-    freshness_policy = Column(JSON, default={
+    freshness_policy = Column(JSON, default=lambda: {
         "ttl_days": 30,
         "recrawl": "changed",
         "priority": "medium"

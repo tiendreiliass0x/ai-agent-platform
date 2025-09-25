@@ -5,7 +5,8 @@ Domain Expertise API Endpoints
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from typing import List, Dict, Any, Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, validator
+from enum import Enum
 
 from app.core.database import get_db
 from app.core.auth import get_current_user
@@ -17,14 +18,30 @@ from app.services.domain_expertise_service import domain_expertise_service
 router = APIRouter()
 
 
+# Validation Enums
+class GroundingMode(str, Enum):
+    STRICT = "strict"
+    BLENDED = "blended"
+
+class FreshnessPriority(str, Enum):
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+
+class RecrawlStrategy(str, Enum):
+    NEVER = "never"
+    CHANGED = "changed"
+    SCHEDULED = "scheduled"
+
+
 # Request/Response Models
 class PersonaCreate(BaseModel):
-    name: str
-    description: Optional[str] = None
-    system_prompt: str
-    tactics: Dict[str, Any] = {}
-    communication_style: Dict[str, Any] = {}
-    response_patterns: Dict[str, Any] = {}
+    name: str = Field(..., min_length=1, max_length=100)
+    description: Optional[str] = Field(None, max_length=500)
+    system_prompt: str = Field(..., min_length=10, max_length=5000)
+    tactics: Dict[str, Any] = Field(default_factory=dict)
+    communication_style: Dict[str, Any] = Field(default_factory=dict)
+    response_patterns: Dict[str, Any] = Field(default_factory=dict)
 
 
 class PersonaResponse(BaseModel):
@@ -44,14 +61,31 @@ class PersonaResponse(BaseModel):
 
 
 class KnowledgePackCreate(BaseModel):
-    name: str
-    description: Optional[str] = None
-    grounding_mode: str = "blended"
-    freshness_policy: Dict[str, Any] = {
+    name: str = Field(..., min_length=1, max_length=100)
+    description: Optional[str] = Field(None, max_length=500)
+    grounding_mode: GroundingMode = GroundingMode.BLENDED
+    freshness_policy: Dict[str, Any] = Field(default_factory=lambda: {
         "ttl_days": 30,
         "recrawl": "changed",
         "priority": "medium"
-    }
+    })
+
+    @validator('freshness_policy')
+    def validate_freshness_policy(cls, v):
+        required_keys = {'ttl_days', 'recrawl', 'priority'}
+        if not all(key in v for key in required_keys):
+            raise ValueError(f'freshness_policy must contain keys: {required_keys}')
+
+        if not isinstance(v['ttl_days'], int) or v['ttl_days'] < 1:
+            raise ValueError('ttl_days must be a positive integer')
+
+        if v['recrawl'] not in ['never', 'changed', 'scheduled']:
+            raise ValueError('recrawl must be one of: never, changed, scheduled')
+
+        if v['priority'] not in ['low', 'medium', 'high']:
+            raise ValueError('priority must be one of: low, medium, high')
+
+        return v
 
 
 class KnowledgePackResponse(BaseModel):
@@ -70,14 +104,38 @@ class KnowledgePackResponse(BaseModel):
 
 
 class DomainExpertiseUpdate(BaseModel):
-    persona_id: Optional[int] = None
-    knowledge_pack_id: Optional[int] = None
-    tool_policy: Dict[str, Any] = {
+    persona_id: Optional[int] = Field(None, ge=1)
+    knowledge_pack_id: Optional[int] = Field(None, ge=1)
+    tool_policy: Dict[str, Any] = Field(default_factory=lambda: {
         "web_search": False,
         "site_search": [],
         "code_exec": False
-    }
-    grounding_mode: str = "blended"
+    })
+    grounding_mode: GroundingMode = GroundingMode.BLENDED
+
+    @validator('tool_policy')
+    def validate_tool_policy(cls, v):
+        required_keys = {'web_search', 'site_search', 'code_exec'}
+        if not all(key in v for key in required_keys):
+            raise ValueError(f'tool_policy must contain keys: {required_keys}')
+
+        if not isinstance(v['web_search'], bool):
+            raise ValueError('web_search must be a boolean')
+
+        if not isinstance(v['site_search'], list):
+            raise ValueError('site_search must be a list')
+
+        if not isinstance(v['code_exec'], bool):
+            raise ValueError('code_exec must be a boolean')
+
+        # Validate site_search URLs
+        import re
+        url_pattern = re.compile(r'^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$')
+        for site in v['site_search']:
+            if not isinstance(site, str) or not url_pattern.match(site):
+                raise ValueError(f'Invalid site domain: {site}')
+
+        return v
 
 
 class TestQueryRequest(BaseModel):

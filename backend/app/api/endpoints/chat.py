@@ -1,11 +1,12 @@
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 import json
 
-from app.core.database import get_db
+from app.core.database import get_db as get_async_db
+from sqlalchemy import select
 from app.models.agent import Agent
 from app.models.conversation import Conversation, Message
 from app.services.domain_expertise_service import domain_expertise_service
@@ -41,12 +42,13 @@ class ConversationHistory(BaseModel):
 async def chat_with_agent(
     agent_id: int,
     chat_data: ChatMessage,
-    db: Session = Depends(get_db)
+    db: AsyncSession = Depends(get_async_db)
 ):
     """Chat with an agent using revolutionary domain expertise"""
 
-    # Get agent with organization
-    agent = db.query(Agent).filter(Agent.id == agent_id).first()
+    # Get agent with organization using async query
+    result = await db.execute(select(Agent).filter(Agent.id == agent_id))
+    agent = result.scalar_one_or_none()
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
 
@@ -144,7 +146,7 @@ async def chat_with_agent(
 async def get_conversation_history(
     agent_id: int,
     conversation_id: str,
-    db: AsyncSession = Depends(get_async_session)
+    db: AsyncSession = Depends(get_async_db)
 ):
     # TODO: Get conversation history
     return [
@@ -192,7 +194,7 @@ async def websocket_chat(
 
 
 # Helper functions
-async def _get_or_create_customer_profile(user_id: str, agent_id: int, db: Session) -> int:
+async def _get_or_create_customer_profile(user_id: str, agent_id: int, db: AsyncSession) -> int:
     """Get or create customer profile for chat user"""
     try:
         # This would integrate with your customer profile service
@@ -208,7 +210,7 @@ async def _save_conversation_message(
     user_message: str,
     ai_response: str,
     metadata: Dict[str, Any],
-    db: Session
+    db: AsyncSession
 ):
     """Save conversation messages to database"""
     try:

@@ -215,7 +215,7 @@ class WebSearchService:
         """Check if agent is within budget limits"""
 
         now = datetime.now()
-        hour_key = f"{agent_id}_{now.hour}"
+        hour_key = f"{agent_id}_{now.hour}_{now.date()}"
 
         # Check hourly limit
         hourly_calls = self.call_tracker.get(hour_key, 0)
@@ -228,22 +228,28 @@ class WebSearchService:
         """Track search usage for budget limits"""
 
         now = datetime.now()
-        hour_key = f"{agent_id}_{now.hour}"
+        hour_key = f"{agent_id}_{now.hour}_{now.date()}"  # Include date to avoid confusion
 
         self.call_tracker[hour_key] = self.call_tracker.get(hour_key, 0) + 1
 
-        # Clean up old tracking data (keep only current and previous hour)
-        keys_to_remove = []
-        for key in self.call_tracker:
-            try:
-                tracked_hour = int(key.split("_")[-1])
-                if abs(tracked_hour - now.hour) > 1:
-                    keys_to_remove.append(key)
-            except:
-                keys_to_remove.append(key)
+        # Clean up old tracking data more aggressively
+        # Keep only current hour and previous hour
+        current_hour_key = f"{agent_id}_{now.hour}_{now.date()}"
+        previous_hour = (now.hour - 1) % 24
+        previous_date = now.date() if now.hour > 0 else (now.date() - timedelta(days=1))
+        previous_hour_key = f"{agent_id}_{previous_hour}_{previous_date}"
+
+        # Remove all keys except current and previous hour
+        valid_keys = {current_hour_key, previous_hour_key}
+        keys_to_remove = [key for key in self.call_tracker.keys() if key not in valid_keys]
 
         for key in keys_to_remove:
             del self.call_tracker[key]
+
+        # Additional safety: if tracker grows too large, clear it
+        if len(self.call_tracker) > 1000:
+            self.call_tracker.clear()
+            self.call_tracker[current_hour_key] = 1
 
     async def search_site_specific(
         self,
@@ -263,12 +269,14 @@ class WebSearchService:
         """Get usage statistics for an agent"""
 
         now = datetime.now()
-        hour_key = f"{agent_id}_{now.hour}"
+        hour_key = f"{agent_id}_{now.hour}_{now.date()}"
 
+        calls_this_hour = self.call_tracker.get(hour_key, 0)
         return {
-            "calls_this_hour": self.call_tracker.get(hour_key, 0),
+            "calls_this_hour": calls_this_hour,
             "limit_per_hour": self.max_calls_per_agent,
-            "remaining_calls": max(0, self.max_calls_per_agent - self.call_tracker.get(hour_key, 0))
+            "remaining_calls": max(0, self.max_calls_per_agent - calls_this_hour),
+            "tracker_size": len(self.call_tracker)  # For monitoring memory usage
         }
 
 
