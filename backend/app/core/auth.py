@@ -13,6 +13,35 @@ class AuthenticationError(Exception):
     pass
 
 
+async def authenticate_user(username: str, password: str) -> Optional[Dict[str, Any]]:
+    """Simple user authentication for testing"""
+    # Mock authentication - replace with real auth in production
+    if username == "testuser@example.com" and password == "password123":
+        return {
+            "id": 1,
+            "username": username,
+            "email": username,
+            "is_active": True
+        }
+    return None
+
+
+def create_user_token(user_data: Dict[str, Any]) -> str:
+    """Create JWT token for user"""
+    payload = {
+        "user_id": user_data.get("id"),
+        "email": user_data.get("email"),
+        "exp": datetime.now(timezone.utc).timestamp() + 3600  # 1 hour
+    }
+    return jwt.encode(payload, "secret-key", algorithm="HS256")
+
+
+def get_password_hash(password: str) -> str:
+    """Hash password (mock implementation)"""
+    import hashlib
+    return hashlib.sha256(password.encode()).hexdigest()
+
+
 async def get_current_user(authorization: Optional[str] = Header(None)) -> Dict[str, Any]:
     """
     Get current user from JWT token

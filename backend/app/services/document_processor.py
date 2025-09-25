@@ -4,9 +4,7 @@ from typing import List, Dict, Any, Optional
 import hashlib
 import uuid
 
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.document_loaders import PyPDFLoader, UnstructuredHTMLLoader
-from langchain.docstore.document import Document
+from app.utils.text_processing import SimpleTextSplitter, SimpleDocument
 from bs4 import BeautifulSoup
 import requests
 import pypdf
@@ -17,11 +15,9 @@ from app.services.embedding_service import EmbeddingService
 
 class DocumentProcessor:
     def __init__(self):
-        self.text_splitter = RecursiveCharacterTextSplitter(
+        self.text_splitter = SimpleTextSplitter(
             chunk_size=1000,
-            chunk_overlap=200,
-            length_function=len,
-            separators=["\n\n", "\n", " ", ""]
+            chunk_overlap=200
         )
         self.vector_store = VectorStoreService()
         self.embedding_service = EmbeddingService()
@@ -174,13 +170,13 @@ class DocumentProcessor:
 
         return text
 
-    async def _create_chunks(self, text: str, source: str) -> List[Document]:
+    async def _create_chunks(self, text: str, source: str) -> List[SimpleDocument]:
         """Split text into chunks for embedding"""
         chunks = self.text_splitter.split_text(text)
 
         documents = []
         for i, chunk in enumerate(chunks):
-            doc = Document(
+            doc = SimpleDocument(
                 page_content=chunk,
                 metadata={
                     "source": source,
@@ -194,7 +190,7 @@ class DocumentProcessor:
 
     async def _store_chunks(
         self,
-        chunks: List[Document],
+        chunks: List[SimpleDocument],
         agent_id: int,
         *,
         document_id: Optional[int] = None,

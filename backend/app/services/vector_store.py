@@ -1,7 +1,6 @@
 import asyncio
 from typing import List, Dict, Any, Optional, Union
 import uuid
-import pinecone
 from pinecone import Pinecone
 import numpy as np
 

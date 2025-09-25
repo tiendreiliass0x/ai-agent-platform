@@ -35,7 +35,7 @@ class IntelligentRAGService:
         session_context: Dict[str, Any] = None,
         system_prompt: str = None,
         agent_config: Dict[str, Any] = None,
-        agent_profile: 'Agent' | None = None
+        agent_profile: Optional['Agent'] = None
     ) -> Dict[str, Any]:
         """Generate personalized response using memory and context"""
 
@@ -671,27 +671,6 @@ CRITICAL INSTRUCTIONS:
             if lines:
                 return "\n".join(lines)
         return ""
-        strategy_length = response_strategy.get("response_length", "medium")
-        adaptive_config["max_tokens"] = length_mapping.get(strategy_length, 500)
-
-        # Generate response using Gemini with adaptive config
-        response_text = await gemini_service.generate_response(
-            prompt=messages[-1]["content"],
-            system_prompt=messages[0]["content"] if messages[0]["role"] == "system" else None,
-            temperature=adaptive_config.get("temperature", 0.7),
-            max_tokens=adaptive_config.get("max_tokens", 500)
-        )
-
-        return {
-            "content": response_text,
-            "model": "gemini-2.0-flash-exp",
-            "usage": {
-                "completion_tokens": len(response_text.split()),
-                "prompt_tokens": len(" ".join([msg["content"] for msg in messages]).split()),
-                "total_tokens": len(response_text.split()) + len(" ".join([msg["content"] for msg in messages]).split())
-            },
-            "intelligence_applied": True
-        }
 
     async def get_customer_insights(
         self,
