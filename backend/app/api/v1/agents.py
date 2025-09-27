@@ -38,7 +38,7 @@ class AgentResponse(BaseModel):
     is_active: bool
     config: Dict[str, Any]
     widget_config: Dict[str, Any]
-    api_key: str
+    api_key: Optional[str]
     created_at: str
     updated_at: Optional[str]
     tier: Optional[str]
@@ -180,11 +180,11 @@ BASE_PERSONAS: Dict[str, Dict[str, Any]] = {
 }
 
 PERSONA_ENUM_MAP: Dict[str, DomainExpertiseType] = {
-    "sales_rep": DomainExpertiseType.SALES_REP,
-    "solution_engineer": DomainExpertiseType.SOLUTION_ENGINEER,
-    "support_expert": DomainExpertiseType.SUPPORT_EXPERT,
-    "domain_specialist": DomainExpertiseType.DOMAIN_SPECIALIST,
-    "product_expert": DomainExpertiseType.PRODUCT_EXPERT,
+    "sales_rep": DomainExpertiseType.sales_rep,
+    "solution_engineer": DomainExpertiseType.solution_engineer,
+    "support_expert": DomainExpertiseType.support_expert,
+    "domain_specialist": DomainExpertiseType.domain_specialist,
+    "product_expert": DomainExpertiseType.product_expert,
 }
 
 GROUNDING_MODES = {"strict", "blended"}
@@ -281,21 +281,23 @@ async def get_industries():
 @router.get("/", response_model=List[AgentResponse])
 async def get_agents(
     organization_id: int,
-    current_user: User = Depends(get_current_user),
+    current_user = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     """Get all agents for an organization"""
     try:
-        # Verify user has access to organization
-        user_org = await db_service.get_user_organization(current_user.id, organization_id)
-        if not user_org or not user_org.can_view_agents:
+        # Verify user has access to organization using new auth system
+        from ...core.auth import verify_organization_access
+        if not verify_organization_access(organization_id, current_user):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="Access denied"
+                detail="Access denied - user does not have access to this organization"
             )
 
         agents = await db_service.get_organization_agents(organization_id)
         return [serialize_agent(agent) for agent in agents]
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -509,9 +511,9 @@ async def update_agent_domain_expertise(
         try:
             existing_tier = AgentTier(existing_tier)
         except ValueError:
-            existing_tier = AgentTier.BASIC
+            existing_tier = AgentTier.basic
     if not existing_tier:
-        existing_tier = AgentTier.BASIC
+        existing_tier = AgentTier.basic
 
     domain_type = agent.domain_expertise_type
     if domain_type and not isinstance(domain_type, DomainExpertiseType):
@@ -531,12 +533,12 @@ async def update_agent_domain_expertise(
         persona_config = BASE_PERSONAS[key].copy()
         if domain_update.persona_overrides:
             persona_config.update(domain_update.persona_overrides)
-        domain_type = PERSONA_ENUM_MAP.get(key, DomainExpertiseType.DOMAIN_SPECIALIST)
+        domain_type = PERSONA_ENUM_MAP.get(key, DomainExpertiseType.domain_specialist)
         persona_changed = True
 
     if domain_update.custom_persona:
         persona_config = domain_update.custom_persona
-        domain_type = DomainExpertiseType.DOMAIN_SPECIALIST
+        domain_type = DomainExpertiseType.domain_specialist
         persona_changed = True
 
     if domain_update.persona_overrides and not domain_update.persona_key and not domain_update.custom_persona:
@@ -589,10 +591,10 @@ async def update_agent_domain_expertise(
     if domain_update.enabled is not None:
         update_fields["domain_expertise_enabled"] = domain_update.enabled
         if domain_update.enabled:
-            update_fields["tier"] = AgentTier.PROFESSIONAL if existing_tier != AgentTier.ENTERPRISE else existing_tier
+            update_fields["tier"] = AgentTier.professional if existing_tier != AgentTier.enterprise else existing_tier
         else:
-            if existing_tier == AgentTier.PROFESSIONAL:
-                update_fields["tier"] = AgentTier.BASIC
+            if existing_tier == AgentTier.professional:
+                update_fields["tier"] = AgentTier.basic
 
     # Persist persona overrides in custom training data for audit
     custom_training_data = agent.custom_training_data or {}

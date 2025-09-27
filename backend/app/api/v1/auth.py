@@ -110,7 +110,7 @@ async def login_user(
             )
 
         # Create access token
-        access_token = create_user_token(user.id, user.email)
+        access_token = create_user_token(user)
 
         return Token(
             access_token=access_token,
@@ -157,7 +157,10 @@ async def refresh_token(
     """Refresh access token"""
     try:
         # Create new access token
-        access_token = create_user_token(current_user.id, current_user.email)
+        access_token = create_user_token({
+            "id": current_user.id,
+            "email": current_user.email
+        })
 
         return Token(
             access_token=access_token,

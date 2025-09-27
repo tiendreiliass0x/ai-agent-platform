@@ -9,6 +9,7 @@ from .user_organization import UserOrganization, OrganizationRole
 from .customer_profile import CustomerProfile
 from .customer_memory import CustomerMemory, MemoryType, MemoryImportance
 from .escalation import Escalation
+from .persona import Persona, KnowledgePack, KnowledgePackSource
 
 __all__ = [
     "Base",
@@ -27,4 +28,7 @@ __all__ = [
     "MemoryType",
     "MemoryImportance",
     "Escalation",
+    "Persona",
+    "KnowledgePack",
+    "KnowledgePackSource",
 ]

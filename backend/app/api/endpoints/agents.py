@@ -1,8 +1,10 @@
 from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
 from typing import List, Optional
-from app.models import get_async_session
+from app.core.auth import get_current_user
+from app.models import Agent, get_async_session
 
 router = APIRouter()
 
@@ -36,10 +38,21 @@ class AgentUpdate(BaseModel):
 
 @router.get("/", response_model=List[AgentResponse])
 async def get_agents(
-    db: AsyncSession = Depends(get_async_session)
+    db: AsyncSession = Depends(get_async_session),
+    current_user: dict = Depends(get_current_user)
 ):
-    # TODO: Get user's agents
-    return []
+    user_id = current_user.get("user_id") or current_user.get("id")
+    if not user_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User authentication required"
+        )
+
+    result = await db.execute(
+        select(Agent).where(Agent.user_id == user_id)
+    )
+    agents = result.scalars().all()
+    return [AgentResponse.model_validate(agent) for agent in agents]
 
 @router.post("/", response_model=AgentResponse)
 async def create_agent(

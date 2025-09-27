@@ -249,6 +249,10 @@ async def get_organization(
                 detail="Organization not found"
             )
 
+        # Get counts using explicit queries to avoid lazy loading issues
+        agents_count = await db_service.count_organization_agents(organization.id)
+        users_count = await db_service.count_organization_users(organization.id)
+
         return OrganizationResponse(
             id=organization.id,
             name=organization.name,
@@ -263,8 +267,8 @@ async def get_organization(
             max_agents=organization.max_agents,
             max_users=organization.max_users,
             max_documents_per_agent=organization.max_documents_per_agent,
-            agents_count=organization.agents_count,
-            active_users_count=organization.active_users_count,
+            agents_count=agents_count,
+            active_users_count=users_count,
             created_at=organization.created_at.isoformat(),
             updated_at=organization.updated_at.isoformat() if organization.updated_at else None
         )
@@ -312,6 +316,10 @@ async def update_organization(
                 detail="Organization not found"
             )
 
+        # Get counts using explicit queries to avoid lazy loading issues
+        agents_count = await db_service.count_organization_agents(organization.id)
+        users_count = await db_service.count_organization_users(organization.id)
+
         return OrganizationResponse(
             id=organization.id,
             name=organization.name,
@@ -326,8 +334,8 @@ async def update_organization(
             max_agents=organization.max_agents,
             max_users=organization.max_users,
             max_documents_per_agent=organization.max_documents_per_agent,
-            agents_count=organization.agents_count,
-            active_users_count=organization.active_users_count,
+            agents_count=agents_count,
+            active_users_count=users_count,
             created_at=organization.created_at.isoformat(),
             updated_at=organization.updated_at.isoformat() if organization.updated_at else None
         )

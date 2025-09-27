@@ -40,6 +40,8 @@ class Organization(Base):
     # Relationships
     user_organizations = relationship("UserOrganization", back_populates="organization", cascade="all, delete-orphan")
     agents = relationship("Agent", back_populates="organization", cascade="all, delete-orphan")
+    personas = relationship("Persona", back_populates="organization", cascade="all, delete-orphan")
+    knowledge_packs = relationship("KnowledgePack", back_populates="organization", cascade="all, delete-orphan")
 
     def __repr__(self):
         return f"<Organization(id={self.id}, name='{self.name}', slug='{self.slug}')>"

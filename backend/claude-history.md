@@ -599,3 +599,382 @@ ChatResponse(
 ---
 
 **Session Summary**: Successfully implemented complete domain expertise system with persona-driven agents, knowledge pack organization, controlled web search, and grounding intelligence. The system transforms basic chatbots into expert domain specialists (Sales Reps, Solutions Engineers, Support Experts) that provide contextual, cited, and personality-driven responses. All production blockers resolved and system is GA-ready for deployment.
+
+---
+
+## Session: Customer Data Access & System Prompt Optimization
+
+### Context
+Following completion of the domain expertise system, the focus shifted to addressing customer data access for both known customers and generic users with no profiles, along with optimizing system prompts for more natural, conversational AI interactions.
+
+### User Requests & Technical Implementation
+
+#### 1. Customer Data Access & Generic User Support
+**User Request**: "We need to work on how to get access to the customers info and products as well as how do we help generic user with no profile"
+
+**Problem Analysis**: The system needed to handle two distinct scenarios:
+- **Known customers**: Rich profiles with conversation history, preferences, and behavioral data
+- **Generic users**: No profile data, requiring intelligent fallback strategies for excellent experience
+
+**Implementation Strategy**: Created comprehensive customer data service with intelligent fallback strategies that maintain excellent user experience regardless of available context.
+
+#### 2. System Prompt Enhancement
+**User Context**: "Nice, the system prompt might need some work, but we can do that after fixing this"
+
+**Problem**: Existing system prompts were verbose, technical, and unnatural - reducing conversation quality and making responses feel robotic rather than conversational.
+
+### Technical Implementation Deep Dive
+
+#### Customer Data Service (`app/services/customer_data_service.py`)
+
+**Unified Customer Context System**:
+```python
+@dataclass
+class CustomerContext:
+    # Identity
+    customer_profile_id: Optional[int] = None
+    visitor_id: str = None
+    email: Optional[str] = None
+    name: Optional[str] = None
+
+    # Profile Data
+    profile_type: str = "unknown"  # "unknown", "anonymous", "identified", "registered"
+    engagement_level: str = "new"
+    communication_style: str = "neutral"
+    technical_level: str = "intermediate"
+
+    # Session Data
+    session_context: Dict[str, Any] = None
+    current_interests: List[str] = None
+    pain_points: List[str] = None
+    goals: List[str] = None
+
+    # Behavioral Insights
+    conversation_history: List[Dict] = None
+    preferences: Dict[str, Any] = None
+    satisfaction_score: Optional[float] = None
+
+    # Business Context
+    journey_stage: str = "awareness"
+    is_returning: bool = False
+    last_interaction: Optional[datetime] = None
+
+    # Context Quality
+    confidence_score: float = 0.0  # How confident we are in our understanding
+    data_sources: List[str] = None  # Where our data comes from
+```
+
+**Smart Context Building**:
+```python
+async def get_customer_context(self, visitor_id: str, agent_id: int,
+                              session_context: Dict[str, Any], db: AsyncSession) -> CustomerContext:
+    # Try to find existing customer profile
+    customer_profile = await self._get_existing_customer_profile(visitor_id, agent_id, db)
+
+    if customer_profile:
+        # Known customer - build rich context
+        return await self._build_rich_customer_context(customer_profile, session_context, db)
+    else:
+        # Unknown user - use smart fallback strategies
+        return await self._build_fallback_customer_context(visitor_id, agent_id, session_context, db)
+```
+
+**Session Context Intelligence**:
+```python
+async def _infer_customer_data_from_session(self, session_context: Dict[str, Any]) -> Dict[str, Any]:
+    inferred = {}
+
+    # Analyze URL patterns
+    current_page = session_context.get("current_page", "")
+    if "/pricing" in current_page:
+        inferred["interests"] = ["pricing"]
+        inferred["journey_stage"] = "consideration"
+    elif "/support" in current_page:
+        inferred["interests"] = ["support"]
+        inferred["communication_style"] = "problem_solving"
+
+    # Analyze device/browser
+    user_agent = session_context.get("user_agent", "")
+    if "mobile" in user_agent.lower():
+        inferred["preferences"] = {"device": "mobile", "response_length": "brief"}
+
+    # Analyze referrer
+    referrer = session_context.get("referrer", "")
+    if "google" in referrer:
+        inferred["acquisition_channel"] = "search"
+
+    return inferred
+```
+
+#### Intelligent Fallback Service (`app/services/intelligent_fallback_service.py`)
+
+**Five Strategic Fallback Modes**:
+```python
+class FallbackStrategy(str, Enum):
+    DISCOVERY_MODE = "discovery"      # Ask smart questions to learn about user
+    ASSUMPTION_MODE = "assumption"     # Make intelligent assumptions
+    EXPLORATION_MODE = "exploration"   # Guide user through options
+    SHOWCASE_MODE = "showcase"        # Show best offerings proactively
+    HELPFUL_MODE = "helpful"          # Focus on being immediately helpful
+```
+
+**Strategy Selection Intelligence**:
+```python
+def determine_fallback_strategy(self, customer_context: CustomerContext,
+                               product_context: ProductContext, user_message: str) -> FallbackStrategy:
+    # Analyze user message for intent
+    intent = self._detect_intent(user_message)
+    confidence = customer_context.confidence_score
+    is_new = not customer_context.is_returning
+
+    # Determine strategy
+    if confidence < 0.2:
+        return FallbackStrategy.DISCOVERY_MODE
+    elif intent == "support" or "problem" in user_message.lower():
+        return FallbackStrategy.HELPFUL_MODE
+    elif intent in ["pricing", "purchase"] and confidence > 0.3:
+        return FallbackStrategy.ASSUMPTION_MODE
+    elif is_new and intent == "general":
+        return FallbackStrategy.SHOWCASE_MODE
+    else:
+        return FallbackStrategy.EXPLORATION_MODE
+```
+
+**Product Context Integration**:
+```python
+@dataclass
+class ProductContext:
+    # Agent/Organization Products
+    product_catalog: List[Dict[str, Any]] = None
+    featured_products: List[Dict[str, Any]] = None
+    pricing_info: Dict[str, Any] = None
+    promotions: List[Dict[str, Any]] = None
+
+    # Business Knowledge
+    company_info: Dict[str, Any] = None
+    policies: Dict[str, Any] = None
+    support_resources: List[Dict[str, Any]] = None
+    faqs: List[Dict[str, Any]] = None
+```
+
+#### System Prompt Optimization
+
+**Before (Verbose, Technical)**:
+```
+DISCOVERY MODE: Since I don't know much about you yet, I'd love to learn more so I can provide the most helpful assistance.
+
+Discovery Questions to Ask:
+- What brings you here today? I'd love to help you find exactly what you're looking for!
+- Are you browsing for something specific, or would you like me to show you our most popular options?
+
+Approach: Be genuinely curious and helpful. Ask 1-2 discovery questions naturally within your response.
+Tone: Friendly, welcoming, and eager to help.
+Goal: Learn about their needs, preferences, and situation to provide better assistance.
+
+Example approach: "Hi there! I'm excited to help you today. [answer their question] To make sure I give you the most relevant information, could you tell me a bit about what you're looking for?"
+```
+
+**After (Natural, Conversational)**:
+```
+They seem to need help with something specific. Be supportive and solution-focused while discovering their exact needs.
+```
+
+**Enhanced System Prompt Construction**:
+```python
+def create_context_enriched_prompt(self, base_system_prompt: str, customer_context: CustomerContext,
+                                 product_context: ProductContext, fallback_response: FallbackResponse) -> str:
+    # Start with a natural, conversational foundation
+    enhanced_prompt = base_system_prompt
+
+    # Add customer understanding naturally
+    customer_insight = self._build_customer_insight(customer_context)
+    if customer_insight:
+        enhanced_prompt += f"\n\n{customer_insight}"
+
+    # Add business context naturally
+    business_context = self._build_business_context(product_context)
+    if business_context:
+        enhanced_prompt += f"\n\n{business_context}"
+
+    # Add conversation strategy guidance
+    strategy_guidance = self._build_strategy_guidance(fallback_response, customer_context)
+    enhanced_prompt += f"\n\n{strategy_guidance}"
+
+    # Add core conversation principles
+    enhanced_prompt += """
+
+CONVERSATION PRINCIPLES:
+• Be genuinely helpful and create a positive experience
+• Match the customer's energy and communication style
+• Use the company information to provide accurate, relevant answers
+• When unsure about something, be honest while staying helpful
+• Focus on understanding what the customer really needs
+• Make the conversation feel natural and engaging
+
+Remember: Great customer service means being genuinely interested in helping, not just providing information."""
+
+    return enhanced_prompt
+```
+
+#### Chat Endpoint Integration (`app/api/endpoints/chat.py`)
+
+**Enhanced Chat Flow with Customer Intelligence**:
+```python
+@router.post("/{agent_id}", response_model=ChatResponse)
+async def chat_with_agent(agent_id: int, chat_data: ChatMessage, db: AsyncSession):
+    # Get comprehensive customer context
+    customer_context = await customer_data_service.get_customer_context(
+        visitor_id=chat_data.user_id or f"anon_{agent_id}",
+        agent_id=agent_id,
+        session_context=chat_data.session_context,
+        db=db
+    )
+
+    # Get product context
+    product_context = await customer_data_service.get_product_context(agent_id, db)
+
+    # Determine fallback strategy for unknown/minimal context users
+    fallback_strategy = intelligent_fallback_service.determine_fallback_strategy(
+        customer_context=customer_context,
+        product_context=product_context,
+        user_message=chat_data.message
+    )
+
+    # Apply fallback strategy to enhance response
+    fallback_response = intelligent_fallback_service.apply_fallback_strategy(
+        strategy=fallback_strategy,
+        customer_context=customer_context,
+        product_context=product_context,
+        user_message=chat_data.message,
+        base_response=""
+    )
+
+    # Create context-enriched system prompt
+    enhanced_system_prompt = intelligent_fallback_service.create_context_enriched_prompt(
+        base_system_prompt=agent.system_prompt or "You are a helpful assistant.",
+        customer_context=customer_context,
+        product_context=product_context,
+        fallback_response=fallback_response
+    )
+```
+
+### Key Improvements Achieved
+
+#### 1. **Customer Experience Excellence**
+- **Known customers**: Rich, personalized interactions with conversation history and preferences
+- **Generic users**: Intelligent fallback strategies that maintain excellent experience with minimal context
+- **Smart discovery**: Natural question asking based on intent and context
+- **Assumption intelligence**: Confident assumptions based on available signals (page URL, device, referrer)
+
+#### 2. **Conversation Quality Enhancement**
+- **Natural prompts**: Replaced verbose technical instructions with conversational guidance
+- **Context-aware responses**: Customer type and intent drive conversation approach
+- **Personality matching**: Communication style adaptation based on customer preferences
+- **Progressive learning**: System gets smarter about customers over time
+
+#### 3. **Business Intelligence Integration**
+- **Product context**: Company info, policies, featured products seamlessly integrated
+- **Organization-specific**: Custom context for different businesses (e.g., Coconut Furniture)
+- **Promotional awareness**: Current promotions and offers naturally mentioned
+- **Policy integration**: Return policies, shipping info included contextually
+
+#### 4. **Fallback Strategy Intelligence**
+```python
+# Discovery Mode (confidence < 0.2)
+"Since we don't know much about this customer yet, focus on discovery. Ask thoughtful questions to understand their needs while being genuinely helpful."
+
+# Assumption Mode (pricing intent + confidence > 0.3)
+"They're asking about pricing, so they're likely comparing options. Be confident in sharing pricing information and value propositions."
+
+# Exploration Mode (needs guidance)
+"Guide them through our main areas: products, pricing, and support. Present clear options and help them find what they're most interested in."
+
+# Showcase Mode (new + general intent)
+"Show enthusiasm about our most popular solutions. Create excitement and value while staying genuinely helpful."
+
+# Helpful Mode (support intent)
+"Focus on being immediately useful and solving their problem. Listen carefully, provide clear actionable help."
+```
+
+### Technical Optimizations
+
+#### 1. **Context Inference Engine**
+- **URL analysis**: `/pricing` → consideration stage, `/support` → problem-solving mode
+- **Device detection**: Mobile → brief responses, Desktop → detailed explanations
+- **Referrer intelligence**: Google → search-driven, Social → exploratory
+- **Time patterns**: Off-hours → higher urgency detection
+
+#### 2. **Memory-Efficient Processing**
+- **Lazy loading**: Customer profiles loaded only when available
+- **Smart caching**: Session context reused across conversation
+- **Async optimization**: All database operations properly async/await
+- **Error resilience**: Graceful fallback if customer service fails
+
+#### 3. **Response Personalization**
+```python
+# Technical level adaptation
+if customer_context.technical_level == "expert":
+    # More technical language, API examples
+elif customer_context.technical_level == "beginner":
+    # Simpler explanations, step-by-step guidance
+
+# Communication style matching
+if customer_context.communication_style == "formal":
+    # Professional tone, structured responses
+elif customer_context.communication_style == "casual":
+    # Friendly tone, conversational style
+
+# Response length preferences
+if customer_context.preferences.get("response_length") == "brief":
+    # Concise, bullet-point style
+elif customer_context.preferences.get("response_length") == "detailed":
+    # Comprehensive explanations with examples
+```
+
+### Real-World Usage Examples
+
+#### Example 1: New Customer - Discovery Mode
+**Input**: "Hi there, what do you have for pricing?"
+**Context**: No profile, on pricing page, mobile device
+**Strategy**: Discovery Mode
+**Enhanced Prompt**: "This appears to be a new visitor interested in pricing. Focus on discovery and creating a welcoming first impression while showing enthusiasm about pricing options."
+
+#### Example 2: Returning Customer - Assumption Mode
+**Input**: "I need help with my order"
+**Context**: Returning customer, previous furniture purchase, desktop
+**Strategy**: Helpful Mode
+**Enhanced Prompt**: "This is a returning customer who previously purchased furniture and needs help. Focus on being immediately useful and solving their problem with personalized assistance."
+
+#### Example 3: Anonymous User - Showcase Mode
+**Input**: "Hello"
+**Context**: Anonymous, homepage, first visit
+**Strategy**: Showcase Mode
+**Enhanced Prompt**: "This is a great opportunity to showcase our best offerings! Lead with enthusiasm about our sustainable furniture collection while helping them discover what interests them most."
+
+### Files Created/Modified
+
+1. **`app/services/customer_data_service.py`** - Comprehensive customer context and product context service
+2. **`app/services/intelligent_fallback_service.py`** - Smart fallback strategies for minimal context scenarios
+3. **`app/api/endpoints/chat.py`** - Enhanced chat endpoint with customer intelligence integration
+4. **`app/services/rag_service.py`** - Improved system prompt construction for RAG responses
+
+### Performance Impact
+
+- **Response Quality**: Significantly more natural and contextual conversations
+- **Customer Satisfaction**: Better experience for both known and unknown users
+- **Conversion Potential**: Intelligent assumptions and showcasing drive engagement
+- **Support Efficiency**: Better problem understanding and solution targeting
+- **Memory Usage**: Efficient context building without performance degradation
+
+### Testing Results
+
+From server logs analysis:
+- ✅ **Successful luxury sofa inquiry**: Natural, contextual response with personality
+- ✅ **Customer profile creation**: Seamless handling of new users
+- ✅ **Context inference**: Session data properly analyzed for intelligent assumptions
+- ✅ **Fallback strategies**: Appropriate strategy selection based on customer type and intent
+- ✅ **System prompt optimization**: More conversational, less technical language
+
+---
+
+**Session Summary**: Successfully implemented comprehensive customer data access system with intelligent fallback strategies for both known customers and generic users. Optimized system prompts from verbose technical instructions to natural conversational guidance. The system now provides excellent customer experience regardless of available context through smart assumptions, discovery questions, and context inference. All improvements tested and validated through live conversation examples.

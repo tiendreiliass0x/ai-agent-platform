@@ -7,6 +7,7 @@ from app.core.config import settings
 from app.services.document_processor import DocumentProcessor
 from app.services.embedding_service import EmbeddingService
 from app.services.gemini_service import gemini_service
+from app.services.personality_service import personality_service
 
 class RAGService:
     def __init__(self):
@@ -21,7 +22,8 @@ class RAGService:
         agent_id: int,
         conversation_history: List[Dict[str, str]] = None,
         system_prompt: str = None,
-        agent_config: Dict[str, Any] = None
+        agent_config: Dict[str, Any] = None,
+        db_session = None
     ) -> Dict[str, Any]:
         """Generate a response using RAG (Retrieval-Augmented Generation)"""
 
@@ -36,26 +38,50 @@ class RAGService:
             # Step 2: Prepare context for LLM
             context_text = self._format_context(context_results)
 
-            # Step 3: Build conversation messages
+            # Step 3: Get agent personality and enhance system prompt
+            personality = None
+            enhanced_system_prompt = system_prompt or "You are a helpful assistant."
+
+            if db_session:
+                personality = await personality_service.get_agent_personality(agent_id, db_session)
+                enhanced_system_prompt = personality_service.inject_personality_into_prompt(
+                    base_prompt=enhanced_system_prompt,
+                    personality=personality,
+                    user_query=query,
+                    context=context_text
+                )
+
+            # Step 4: Build conversation messages
             messages = self._build_messages(
                 query=query,
                 context=context_text,
                 conversation_history=conversation_history or [],
-                system_prompt=system_prompt or "You are a helpful assistant."
+                system_prompt=enhanced_system_prompt
             )
 
-            # Step 4: Generate response
+            # Step 5: Generate response
             response = await self._generate_llm_response(messages, agent_config or {})
 
-            # Step 5: Track sources and metadata
+            # Step 6: Apply personality enhancement to response
+            enhanced_response_content = response["content"]
+            if personality:
+                enhanced_response_content = personality_service.enhance_response_with_personality(
+                    response=enhanced_response_content,
+                    personality=personality,
+                    user_query=query,
+                    conversation_history=conversation_history or []
+                )
+
+            # Step 7: Track sources and metadata
             sources = self._extract_sources(context_results)
 
             return {
-                "response": response["content"],
+                "response": enhanced_response_content,
                 "sources": sources,
                 "context_used": len(context_results),
                 "token_usage": response.get("token_usage", {}),
-                "model_used": response.get("model", "unknown")
+                "model_used": response.get("model", "unknown"),
+                "personality_applied": personality is not None
             }
 
         except Exception as e:
@@ -96,15 +122,14 @@ class RAGService:
         # Enhanced system prompt with context
         enhanced_system_prompt = f"""{system_prompt}
 
-You have access to a knowledge base with relevant information. Use this information to answer questions accurately and helpfully.
+You have access to relevant information from our knowledge base to help answer questions accurately.
 
-When answering:
-1. Use the provided context when relevant
-2. If the context doesn't contain the answer, say so clearly
-3. Be conversational and helpful
-4. Cite sources when possible
+Guidelines for using this information:
+• Reference the context naturally when it's relevant to the customer's question
+• If the available information doesn't fully answer their question, be honest about limitations while staying helpful
+• Keep your responses conversational and engaging
+• When referencing specific details, you can mention the source naturally (e.g., "According to our product guide...")
 
-Context Information:
 {context}"""
 
         messages = [{"role": "system", "content": enhanced_system_prompt}]
@@ -207,7 +232,8 @@ Context Information:
         agent_id: int,
         conversation_history: List[Dict[str, str]] = None,
         system_prompt: str = None,
-        agent_config: Dict[str, Any] = None
+        agent_config: Dict[str, Any] = None,
+        db_session = None
     ):
         """Generate a streaming response using RAG with Gemini"""
 
@@ -219,13 +245,27 @@ Context Information:
                 top_k=5
             )
 
-            # Step 2: Prepare context and messages
+            # Step 2: Prepare context and personality enhancement
             context_text = self._format_context(context_results)
+
+            # Get agent personality and enhance system prompt
+            personality = None
+            enhanced_system_prompt = system_prompt or "You are a helpful assistant."
+
+            if db_session:
+                personality = await personality_service.get_agent_personality(agent_id, db_session)
+                enhanced_system_prompt = personality_service.inject_personality_into_prompt(
+                    base_prompt=enhanced_system_prompt,
+                    personality=personality,
+                    user_query=query,
+                    context=context_text
+                )
+
             messages = self._build_messages(
                 query=query,
                 context=context_text,
                 conversation_history=conversation_history or [],
-                system_prompt=system_prompt or "You are a helpful assistant."
+                system_prompt=enhanced_system_prompt
             )
 
             # Step 3: Send initial metadata

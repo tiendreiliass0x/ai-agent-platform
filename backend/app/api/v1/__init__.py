@@ -9,6 +9,8 @@ from .system import router as system_router
 from .auth import router as auth_router
 from .organizations import router as organizations_router
 from .conversations import router as conversations_router
+from .governance_test import router as governance_test_router
+from .integrations import router as integrations_router
 
 api_router = APIRouter()
 
@@ -19,3 +21,5 @@ api_router.include_router(agents_router, prefix="/agents", tags=["agents"])
 api_router.include_router(documents_router, prefix="/documents", tags=["documents"])
 api_router.include_router(system_router, prefix="/system", tags=["system"])
 api_router.include_router(conversations_router, prefix="/conversations", tags=["conversations"])
+api_router.include_router(governance_test_router, prefix="/governance", tags=["governance-testing"])
+api_router.include_router(integrations_router, prefix="/integrations", tags=["integrations"])

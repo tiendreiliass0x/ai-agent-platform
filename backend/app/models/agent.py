@@ -6,17 +6,17 @@ from ..core.database import Base
 
 class AgentTier(PyEnum):
     """Agent subscription tiers"""
-    BASIC = "basic"           # Standard knowledge base only
-    PROFESSIONAL = "professional"  # + Domain expertise + web search
-    ENTERPRISE = "enterprise"      # + Custom training + advanced analytics
+    basic = "basic"           # Standard knowledge base only
+    professional = "professional"  # + Domain expertise + web search
+    enterprise = "enterprise"      # + Custom training + advanced analytics
 
 class DomainExpertiseType(PyEnum):
     """Types of domain expertise"""
-    SALES_REP = "sales_rep"               # Sales representative with product knowledge
-    SOLUTION_ENGINEER = "solution_engineer" # Technical solution specialist
-    SUPPORT_EXPERT = "support_expert"      # Expert support with deep troubleshooting
-    DOMAIN_SPECIALIST = "domain_specialist" # Industry/niche domain expert
-    PRODUCT_EXPERT = "product_expert"      # Deep product knowledge specialist
+    sales_rep = "sales_rep"               # Sales representative with product knowledge
+    solution_engineer = "solution_engineer" # Technical solution specialist
+    support_expert = "support_expert"      # Expert support with deep troubleshooting
+    domain_specialist = "domain_specialist" # Industry/niche domain expert
+    product_expert = "product_expert"      # Deep product knowledge specialist
 
 class Agent(Base):
     __tablename__ = "agents"
@@ -28,7 +28,7 @@ class Agent(Base):
     is_active = Column(Boolean, default=True)
 
     # Tier and Expertise Configuration
-    tier = Column(SQLEnum(AgentTier), default=AgentTier.BASIC)
+    tier = Column(SQLEnum(AgentTier), default=AgentTier.basic)
     domain_expertise_enabled = Column(Boolean, default=False)
 
     # Domain Expertise Links

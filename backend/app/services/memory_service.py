@@ -1,5 +1,7 @@
 """
 Advanced Memory Service for intelligent customer context management.
+
+Enhanced with governance and consent management for privacy compliance.
 """
 
 import json
@@ -13,6 +15,10 @@ from sqlalchemy.orm import selectinload
 from sqlalchemy import and_, or_, desc, func
 
 from ..core.database import get_db
+from ..core.governance import (
+    ConsentContext, ConsentScope, DataRetentionPolicy, governance_engine,
+    InferenceCategory, EvidenceItem
+)
 from ..models.customer_profile import CustomerProfile
 from ..models.customer_memory import CustomerMemory, MemoryType, MemoryImportance
 from ..models.conversation import Conversation
@@ -21,15 +27,80 @@ from ..services.database_service import db_service
 
 
 class MemoryService:
-    """Advanced memory management for intelligent agents"""
+    """Advanced memory management for intelligent agents with governance enforcement"""
 
     def __init__(self):
-        pass
+        self.memory_consent_mapping = {
+            MemoryType.FACTUAL: ConsentScope.STORE_PREFERENCES,
+            MemoryType.PREFERENCE: ConsentScope.STORE_PREFERENCES,
+            MemoryType.BEHAVIORAL: ConsentScope.ANALYZE_BEHAVIOR,
+            MemoryType.CONTEXTUAL: ConsentScope.USE_CONVERSATION_HISTORY,
+            MemoryType.EPISODIC: ConsentScope.USE_CONVERSATION_HISTORY,
+            MemoryType.PROCEDURAL: ConsentScope.ANALYZE_BEHAVIOR,
+            MemoryType.EMOTIONAL: ConsentScope.ANALYZE_BEHAVIOR
+        }
 
     async def get_session(self) -> AsyncSession:
         """Get database session"""
         from ..core.database import get_db_session
         return await get_db_session()
+
+    def _validate_memory_consent(
+        self,
+        memory_type: MemoryType,
+        consent_context: Optional[ConsentContext]
+    ) -> bool:
+        """Validate if we have consent to store this type of memory"""
+        if not consent_context:
+            return False
+
+        required_consent = self.memory_consent_mapping.get(memory_type)
+        if not required_consent:
+            return False
+
+        return governance_engine.validate_consent(consent_context, required_consent)
+
+    def _apply_retention_policy(
+        self,
+        memory_type: MemoryType,
+        consent_context: Optional[ConsentContext]
+    ) -> Tuple[DataRetentionPolicy, Optional[datetime]]:
+        """Determine retention policy and expiration for memory"""
+        if not consent_context:
+            return DataRetentionPolicy.SESSION_ONLY, datetime.now() + timedelta(hours=1)
+
+        base_policy = consent_context.data_retention_policy
+
+        # Override for sensitive memory types
+        if memory_type in [MemoryType.BEHAVIORAL, MemoryType.EMOTIONAL]:
+            if base_policy == DataRetentionPolicy.LONG_TERM:
+                base_policy = DataRetentionPolicy.MEDIUM_TERM
+
+        # Calculate expiration based on policy
+        now = datetime.now()
+        if base_policy == DataRetentionPolicy.SESSION_ONLY:
+            expiry = now + timedelta(hours=1)
+        elif base_policy == DataRetentionPolicy.SHORT_TERM:
+            expiry = now + timedelta(days=7)
+        elif base_policy == DataRetentionPolicy.MEDIUM_TERM:
+            expiry = now + timedelta(days=90)
+        elif base_policy == DataRetentionPolicy.LONG_TERM:
+            expiry = now + timedelta(days=365)
+        else:
+            expiry = now + timedelta(hours=1)  # Default to session only
+
+        return base_policy, expiry
+
+    def _redact_memory_content(
+        self,
+        content: str,
+        consent_context: Optional[ConsentContext]
+    ) -> str:
+        """Apply PII redaction if required"""
+        if not consent_context or not consent_context.pii_redaction_enabled:
+            return content
+
+        return governance_engine.redact_pii(content, hash_identifiers=True)
 
     # Customer Profile Management
     async def get_or_create_customer_profile(
@@ -108,21 +179,47 @@ class MemoryService:
         context: Dict[str, Any] = None,
         conversation_id: int = None,
         confidence_score: float = 1.0,
-        tags: List[str] = None
-    ) -> CustomerMemory:
-        """Store a new memory entry"""
+        tags: List[str] = None,
+        consent_context: Optional[ConsentContext] = None
+    ) -> Optional[CustomerMemory]:
+        """Store a new memory entry with governance enforcement"""
+
+        # Governance validation
+        if not self._validate_memory_consent(memory_type, consent_context):
+            # Log blocked attempt for audit
+            governance_engine.create_audit_log(
+                action="memory_storage_blocked",
+                customer_id=str(customer_profile_id),
+                data_access={"memory_type": memory_type.value, "reason": "insufficient_consent"},
+                consent_context=consent_context
+            )
+            return None
+
+        # Apply retention policy
+        retention_policy, expiry_date = self._apply_retention_policy(memory_type, consent_context)
+
+        # Redact PII if required
+        processed_value = self._redact_memory_content(value, consent_context)
+        processed_key = self._redact_memory_content(key, consent_context)
+
         async with await self.get_session() as db:
             # Check if similar memory exists
             existing_memory = await self._find_similar_memory(
-                customer_profile_id, key, memory_type
+                customer_profile_id, processed_key, memory_type
             )
 
             if existing_memory:
+                # Validate update consent
+                if not governance_engine.should_persist_data(memory_type.value, consent_context):
+                    return None
+
                 # Update existing memory
-                existing_memory.value = value
+                existing_memory.value = processed_value
                 existing_memory.confidence_score = max(existing_memory.confidence_score, confidence_score)
                 existing_memory.last_accessed = datetime.utcnow()
                 existing_memory.access_count += 1
+                existing_memory.valid_until = expiry_date
+
                 if context:
                     existing_memory.context.update(context)
                 if tags:
@@ -131,24 +228,44 @@ class MemoryService:
 
                 await db.commit()
                 await db.refresh(existing_memory)
+
+                # Create audit log
+                governance_engine.create_audit_log(
+                    action="memory_updated",
+                    customer_id=str(customer_profile_id),
+                    data_access={"memory_type": memory_type.value, "retention_policy": retention_policy.value},
+                    consent_context=consent_context
+                )
+
                 return existing_memory
 
-            # Create new memory
+            # Create new memory with governance controls
             memory = CustomerMemory(
                 customer_profile_id=customer_profile_id,
                 conversation_id=conversation_id,
                 memory_type=memory_type.value,
-                key=key,
-                value=value,
+                key=processed_key,
+                value=processed_value,
                 importance=importance.value,
                 confidence_score=confidence_score,
                 context=context or {},
-                tags=tags or []
+                tags=tags or [],
+                valid_until=expiry_date,
+                source=f"governed_storage_{retention_policy.value}"
             )
 
             db.add(memory)
             await db.commit()
             await db.refresh(memory)
+
+            # Create audit log
+            governance_engine.create_audit_log(
+                action="memory_created",
+                customer_id=str(customer_profile_id),
+                data_access={"memory_type": memory_type.value, "retention_policy": retention_policy.value},
+                consent_context=consent_context
+            )
+
             return memory
 
     async def retrieve_memories(
@@ -157,15 +274,32 @@ class MemoryService:
         memory_types: List[MemoryType] = None,
         tags: List[str] = None,
         min_confidence: float = 0.3,
-        limit: int = 50
+        limit: int = 50,
+        consent_context: Optional[ConsentContext] = None
     ) -> List[CustomerMemory]:
-        """Retrieve relevant memories for context"""
+        """Retrieve relevant memories for context with governance enforcement"""
+
+        # Filter memory types based on consent
+        if consent_context and memory_types:
+            allowed_types = []
+            for mt in memory_types:
+                if self._validate_memory_consent(mt, consent_context):
+                    allowed_types.append(mt)
+            memory_types = allowed_types
+
+        if memory_types is not None and not memory_types:  # No allowed types
+            return []
+
         async with await self.get_session() as db:
             query = select(CustomerMemory).where(
                 and_(
                     CustomerMemory.customer_profile_id == customer_profile_id,
                     CustomerMemory.is_active == True,
-                    CustomerMemory.confidence_score >= min_confidence
+                    CustomerMemory.confidence_score >= min_confidence,
+                    or_(
+                        CustomerMemory.valid_until.is_(None),
+                        CustomerMemory.valid_until > datetime.utcnow()
+                    )
                 )
             )
 
@@ -183,9 +317,21 @@ class MemoryService:
             result = await db.execute(query)
             memories = result.scalars().all()
 
-            # Update access tracking
-            for memory in memories:
-                memory.access()
+            # Update access tracking and create audit log
+            if memories:
+                for memory in memories:
+                    memory.access()
+
+                # Log memory access for audit
+                governance_engine.create_audit_log(
+                    action="memory_accessed",
+                    customer_id=str(customer_profile_id),
+                    data_access={
+                        "memory_count": len(memories),
+                        "memory_types": list(set(m.memory_type for m in memories))
+                    },
+                    consent_context=consent_context
+                )
 
             await db.commit()
             return memories
@@ -433,6 +579,134 @@ class MemoryService:
                 insights['interests'].append(interest)
 
         return insights
+
+    # Governance-specific methods
+    async def cleanup_expired_memories(self) -> Dict[str, int]:
+        """Clean up expired memories based on retention policies"""
+        async with await self.get_session() as db:
+            # Find expired memories
+            expired_query = select(CustomerMemory).where(
+                and_(
+                    CustomerMemory.valid_until.isnot(None),
+                    CustomerMemory.valid_until <= datetime.utcnow(),
+                    CustomerMemory.is_active == True
+                )
+            )
+
+            result = await db.execute(expired_query)
+            expired_memories = result.scalars().all()
+
+            cleanup_count = len(expired_memories)
+            retention_counts = {}
+
+            for memory in expired_memories:
+                # Mark as inactive instead of deleting for audit trail
+                memory.is_active = False
+                memory.invalidate()
+
+                # Track by source for reporting
+                source = memory.source or "unknown"
+                retention_counts[source] = retention_counts.get(source, 0) + 1
+
+            await db.commit()
+
+            # Log cleanup for audit
+            if cleanup_count > 0:
+                governance_engine.create_audit_log(
+                    action="memory_cleanup_expired",
+                    customer_id="system",
+                    data_access={
+                        "cleaned_count": cleanup_count,
+                        "retention_breakdown": retention_counts
+                    }
+                )
+
+            return {
+                "total_cleaned": cleanup_count,
+                "by_retention_policy": retention_counts
+            }
+
+    async def revoke_consent_memories(
+        self,
+        customer_profile_id: int,
+        revoked_consents: List[ConsentScope]
+    ) -> int:
+        """Remove memories that are no longer consented to"""
+        async with await self.get_session() as db:
+            # Find memories that require revoked consents
+            affected_types = []
+            for memory_type, required_consent in self.memory_consent_mapping.items():
+                if required_consent in revoked_consents:
+                    affected_types.append(memory_type.value)
+
+            if not affected_types:
+                return 0
+
+            # Find affected memories
+            affected_query = select(CustomerMemory).where(
+                and_(
+                    CustomerMemory.customer_profile_id == customer_profile_id,
+                    CustomerMemory.memory_type.in_(affected_types),
+                    CustomerMemory.is_active == True
+                )
+            )
+
+            result = await db.execute(affected_query)
+            affected_memories = result.scalars().all()
+
+            # Mark as inactive
+            for memory in affected_memories:
+                memory.is_active = False
+                memory.source = f"consent_revoked_{memory.source}"
+
+            await db.commit()
+
+            # Log consent revocation
+            governance_engine.create_audit_log(
+                action="memory_consent_revoked",
+                customer_id=str(customer_profile_id),
+                data_access={
+                    "revoked_consents": [c.value for c in revoked_consents],
+                    "affected_memories": len(affected_memories),
+                    "memory_types": affected_types
+                }
+            )
+
+            return len(affected_memories)
+
+    async def get_memory_audit_trail(
+        self,
+        customer_profile_id: int,
+        days_back: int = 30
+    ) -> List[Dict[str, Any]]:
+        """Get audit trail for customer memory operations"""
+        async with await self.get_session() as db:
+            # Get recent memory operations
+            since_date = datetime.utcnow() - timedelta(days=days_back)
+
+            # Get memory creation/updates
+            query = select(CustomerMemory).where(
+                and_(
+                    CustomerMemory.customer_profile_id == customer_profile_id,
+                    CustomerMemory.created_at >= since_date
+                )
+            ).order_by(desc(CustomerMemory.created_at))
+
+            result = await db.execute(query)
+            memories = result.scalars().all()
+
+            audit_trail = []
+            for memory in memories:
+                audit_trail.append({
+                    "timestamp": memory.created_at.isoformat(),
+                    "action": "memory_created" if memory.is_active else "memory_deactivated",
+                    "memory_type": memory.memory_type,
+                    "importance": memory.importance,
+                    "source": memory.source,
+                    "retention_policy": "inferred_from_source"
+                })
+
+            return audit_trail
 
 
 # Global instance

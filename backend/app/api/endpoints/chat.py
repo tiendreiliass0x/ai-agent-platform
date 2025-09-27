@@ -11,7 +11,9 @@ from app.models.agent import Agent
 from app.models.conversation import Conversation, Message
 from app.services.domain_expertise_service import domain_expertise_service
 from app.services.concierge_intelligence_service import concierge_intelligence
-from app.services.customer_profile_service import customer_profile_service
+from app.services.rag_service import RAGService
+from app.services.customer_data_service import customer_data_service
+from app.services.intelligent_fallback_service import intelligent_fallback_service
 
 router = APIRouter()
 
@@ -88,32 +90,75 @@ async def chat_with_agent(
             )
 
         else:
-            # Fallback to concierge intelligence service
-            concierge_case = await concierge_intelligence.build_concierge_case(
-                customer_profile_id=customer_profile_id,
-                current_message=chat_data.message,
+            # Use enhanced customer data and intelligent fallback system
+            rag_service = RAGService()
+
+            # Get comprehensive customer context
+            customer_context = await customer_data_service.get_customer_context(
+                visitor_id=chat_data.user_id or f"anon_{agent_id}",
+                agent_id=agent_id,
                 session_context=chat_data.session_context,
-                agent_id=agent_id
+                db=db
             )
 
-            # Generate response using existing concierge intelligence
-            llm_context = await concierge_intelligence.generate_llm_context(concierge_case)
+            # Get product context
+            product_context = await customer_data_service.get_product_context(agent_id, db)
 
-            # Simple response generation (in production, integrate with your LLM service)
-            from app.services.gemini_service import gemini_service
-            ai_response = await gemini_service.generate_response(
-                prompt=f"Context: {llm_context}\n\nUser: {chat_data.message}",
-                system_prompt=agent.system_prompt or "You are a helpful assistant.",
-                temperature=0.7
+            # Determine fallback strategy for unknown/minimal context users
+            fallback_strategy = intelligent_fallback_service.determine_fallback_strategy(
+                customer_context=customer_context,
+                product_context=product_context,
+                user_message=chat_data.message
+            )
+
+            # Apply fallback strategy to enhance response
+            fallback_response = intelligent_fallback_service.apply_fallback_strategy(
+                strategy=fallback_strategy,
+                customer_context=customer_context,
+                product_context=product_context,
+                user_message=chat_data.message,
+                base_response=""  # We'll let RAG generate the base response
+            )
+
+            # Create context-enriched system prompt
+            enhanced_system_prompt = intelligent_fallback_service.create_context_enriched_prompt(
+                base_system_prompt=agent.system_prompt or "You are a helpful assistant.",
+                customer_context=customer_context,
+                product_context=product_context,
+                fallback_response=fallback_response
+            )
+
+            # Generate enhanced response with all context
+            rag_response = await rag_service.generate_response(
+                query=chat_data.message,
+                agent_id=agent_id,
+                conversation_history=customer_context.conversation_history or [],
+                system_prompt=enhanced_system_prompt,
+                agent_config=agent.config or {},
+                db_session=db
+            )
+
+            # Create or update customer profile based on this interaction
+            await customer_data_service.create_or_update_customer_profile(
+                visitor_id=chat_data.user_id or f"anon_{agent_id}",
+                agent_id=agent_id,
+                session_context=chat_data.session_context,
+                interaction_data={
+                    "message_count": 1,
+                    "interests": customer_context.current_interests,
+                    "communication_style": customer_context.communication_style
+                },
+                db=db
             )
 
             response = ChatResponse(
-                response=ai_response,
+                response=rag_response["response"],
                 conversation_id=chat_data.conversation_id or f"conv_{agent_id}_{int(datetime.now().timestamp())}",
-                confidence_score=0.7,
-                sources=[],
+                confidence_score=customer_context.confidence_score,
+                sources=rag_response.get("sources", []),
                 grounding_mode="blended",
-                persona_applied="Standard"
+                persona_applied=f"Enhanced ({fallback_strategy.value})" if rag_response.get("personality_applied", False) else f"Fallback ({fallback_strategy.value})",
+                web_search_used=False
             )
 
         # Save conversation (simplified)
