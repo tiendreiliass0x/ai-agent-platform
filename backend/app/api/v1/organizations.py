@@ -56,8 +56,9 @@ class OrganizationResponse(BaseModel):
     created_at: str
     updated_at: Optional[str]
 
-    class Config:
-        from_attributes = True
+    model_config = {
+        "from_attributes": True,
+    }
 
 
 class CRMConfig(BaseModel):
@@ -80,8 +81,9 @@ class UserOrganizationResponse(BaseModel):
     user_name: str
     user_email: str
 
-    class Config:
-        from_attributes = True
+    model_config = {
+        "from_attributes": True,
+    }
 
 
 class InviteUserRequest(BaseModel):

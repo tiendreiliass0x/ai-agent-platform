@@ -51,7 +51,12 @@ class MemoryService:
         consent_context: Optional[ConsentContext]
     ) -> bool:
         """Validate if we have consent to store this type of memory"""
+        # If no consent context provided, create safe default for basic memory types
         if not consent_context:
+            # Allow basic factual and preference storage with implicit consent
+            if memory_type in [MemoryType.FACTUAL, MemoryType.PREFERENCE, MemoryType.CONTEXTUAL]:
+                return True
+            # Block sensitive memory types without explicit consent
             return False
 
         required_consent = self.memory_consent_mapping.get(memory_type)
@@ -67,7 +72,11 @@ class MemoryService:
     ) -> Tuple[DataRetentionPolicy, Optional[datetime]]:
         """Determine retention policy and expiration for memory"""
         if not consent_context:
-            return DataRetentionPolicy.SESSION_ONLY, datetime.now() + timedelta(hours=1)
+            # Apply safe default retention based on memory type
+            if memory_type in [MemoryType.FACTUAL, MemoryType.PREFERENCE]:
+                return DataRetentionPolicy.SHORT_TERM, datetime.now() + timedelta(days=7)
+            else:
+                return DataRetentionPolicy.SESSION_ONLY, datetime.now() + timedelta(hours=1)
 
         base_policy = consent_context.data_retention_policy
 

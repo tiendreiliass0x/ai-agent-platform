@@ -57,7 +57,8 @@ GET  /api/v1/domain-expertise/personas          # List personas
 POST /api/v1/domain-expertise/knowledge-packs   # Create knowledge packs
 PATCH /api/v1/domain-expertise/agents/{id}/domain-expertise  # Configure agents
 POST /api/v1/domain-expertise/test-query        # Test domain expertise
-POST /api/v1/chat/{agent_id}                    # Enhanced chat with domain expertise
+POST /api/v1/chat/{agent_public_id}             # Enhanced chat with domain expertise
+POST /api/v1/chat/{agent_public_id}/stream      # Streaming responses via SSE
 ```
 
 ---

@@ -17,6 +17,7 @@ class AgentCreate(BaseModel):
 
 class AgentResponse(BaseModel):
     id: int
+    public_id: str
     name: str
     description: Optional[str] = None
     system_prompt: Optional[str] = None
@@ -25,8 +26,9 @@ class AgentResponse(BaseModel):
     config: dict
     widget_config: dict
 
-    class Config:
-        from_attributes = True
+    model_config = {
+        "from_attributes": True,
+    }
 
 class AgentUpdate(BaseModel):
     name: Optional[str] = None
@@ -62,6 +64,7 @@ async def create_agent(
     # TODO: Create new agent
     return {
         "id": 1,
+        "public_id": "00000000-0000-0000-0000-000000000001",
         "name": agent_data.name,
         "description": agent_data.description,
         "system_prompt": agent_data.system_prompt,
@@ -79,6 +82,7 @@ async def get_agent(
     # TODO: Get specific agent
     return {
         "id": agent_id,
+        "public_id": "00000000-0000-0000-0000-000000000001",
         "name": "Sample Agent",
         "description": "A sample agent",
         "system_prompt": "You are a helpful assistant",
@@ -97,6 +101,7 @@ async def update_agent(
     # TODO: Update agent
     return {
         "id": agent_id,
+        "public_id": "00000000-0000-0000-0000-000000000001",
         "name": "Updated Agent",
         "description": "Updated description",
         "system_prompt": "You are a helpful assistant",

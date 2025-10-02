@@ -4,15 +4,18 @@ Replaces mock data with actual database persistence.
 """
 
 from typing import List, Dict, Any, Optional
+from collections import Counter
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
-from sqlalchemy import and_, or_, desc, func
+from sqlalchemy import and_, or_, desc, func, delete
 import hashlib
+import uuid
 import secrets
 from datetime import datetime, timedelta
 
-from ..core.database import get_db
+from ..core.database import get_db, get_db_session
+from ..core.auth import get_password_hash
 from ..models.user import User
 from ..models.agent import Agent
 from ..models.document import Document
@@ -33,6 +36,15 @@ class DatabaseService:
         from ..core.database import get_db_session
         return await get_db_session()
 
+    async def _ensure_agent_public_id(self, agent: Optional[Agent], db: AsyncSession) -> Optional[Agent]:
+        """Guarantee agent has a non-guessable public identifier."""
+        if agent and not getattr(agent, "public_id", None):
+            agent.public_id = str(uuid.uuid4())
+            db.add(agent)
+            await db.commit()
+            await db.refresh(agent)
+        return agent
+
     # User Operations
     async def create_user(
         self,
@@ -41,11 +53,20 @@ class DatabaseService:
         name: str,
         plan: str = "free"
     ) -> User:
-        """Create a new user"""
+        """Create a new user.
+
+        Automatically hashes the password if raw text is provided to prevent
+        accidental storage of plaintext credentials.
+        """
+
         async with await self.get_session() as db:
+            normalized_hash = password_hash or ""
+            if not normalized_hash.startswith("$2"):
+                normalized_hash = get_password_hash(normalized_hash)
+
             user = User(
                 email=email,
-                password_hash=password_hash,
+                password_hash=normalized_hash,
                 name=name,
                 plan=plan,
                 is_active=True
@@ -74,46 +95,75 @@ class DatabaseService:
     # Agent Operations
     async def create_agent(
         self,
+        db: AsyncSession,
         user_id: int,
         organization_id: int,
         name: str,
         description: str,
         system_prompt: str,
         config: Dict[str, Any] = None,
-        widget_config: Dict[str, Any] = None
+        widget_config: Dict[str, Any] = None,
+        idempotency_key: str = None
     ) -> Agent:
-        """Create a new agent"""
-        async with await self.get_session() as db:
-            # Generate unique API key
-            api_key = f"agent_{secrets.token_urlsafe(32)}"
+        """Create a new agent within a database session
 
-            agent = Agent(
-                user_id=user_id,
-                organization_id=organization_id,
-                name=name,
-                description=description,
-                system_prompt=system_prompt,
-                api_key=api_key,
-                config=config or {},
-                widget_config=widget_config or {},
-                is_active=True,
-                total_conversations=0,
-                total_messages=0
-            )
-            db.add(agent)
-            await db.commit()
-            await db.refresh(agent)
-            return agent
+        Args:
+            db: Database session (required). Caller controls transaction.
+            user_id: ID of user creating the agent
+            organization_id: ID of organization owning the agent
+            idempotency_key: Optional key for idempotent creation
 
-    async def get_agent_by_id(self, agent_id: int) -> Optional[Agent]:
-        """Get agent by ID"""
-        async with await self.get_session() as db:
+        Note: Agent is added to session but NOT committed. Caller must commit.
+        """
+        # Generate unique API key
+        api_key = f"agent_{secrets.token_urlsafe(32)}"
+
+        agent = Agent(
+            user_id=user_id,
+            organization_id=organization_id,
+            name=name,
+            description=description,
+            system_prompt=system_prompt,
+            public_id=str(uuid.uuid4()),
+            api_key=api_key,
+            config=config or {},
+            widget_config=widget_config or {},
+            idempotency_key=idempotency_key,
+            is_active=True,
+            total_conversations=0,
+            total_messages=0
+        )
+
+        db.add(agent)
+        await db.flush()  # Get ID without committing
+        await db.refresh(agent)
+        return agent
+
+    async def get_agent_by_id(self, agent_id: int, db: AsyncSession = None) -> Optional[Agent]:
+        """Get agent by ID
+
+        Args:
+            agent_id: Agent ID
+            db: Optional database session. If not provided, creates a new one.
+        """
+        if db:
             result = await db.execute(
                 select(Agent)
                 .options(selectinload(Agent.documents))
                 .where(Agent.id == agent_id)
             )
-            return result.scalar_one_or_none()
+            agent = result.scalar_one_or_none()
+            return agent  # Skip ensure_public_id in provided session
+        else:
+            async with await self.get_session() as db:
+                result = await db.execute(
+                    select(Agent)
+                    .options(selectinload(Agent.documents))
+                    .where(Agent.id == agent_id)
+                )
+                agent = result.scalar_one_or_none()
+                return await self._ensure_agent_public_id(agent, db)
+            
 
     async def get_agent_by_api_key(self, api_key: str) -> Optional[Agent]:
         """Get agent by API key"""
@@ -121,7 +171,60 @@ class DatabaseService:
             result = await db.execute(
                 select(Agent).where(Agent.api_key == api_key)
             )
+            agent = result.scalar_one_or_none()
+            return await self._ensure_agent_public_id(agent, db)
+
+    async def get_agent_by_public_id(self, public_id: str) -> Optional[Agent]:
+        """Get agent using its public UUID."""
+        async with await self.get_session() as db:
+            result = await db.execute(
+                select(Agent)
+                .options(selectinload(Agent.documents))
+                .where(Agent.public_id == public_id)
+            )
+            agent = result.scalar_one_or_none()
+            return await self._ensure_agent_public_id(agent, db)
+
+
+    async def get_agent_by_idempotency_key(
+        self,
+        user_id: int,
+        organization_id: int,
+        idempotency_key: str,
+        db: AsyncSession = None
+    ) -> Optional[Agent]:
+        """Get agent by idempotency key (scoped to user and organization)"""
+        async def _query(session: AsyncSession):
+            result = await session.execute(
+                select(Agent)
+                .where(and_(
+                    Agent.user_id == user_id,
+                    Agent.organization_id == organization_id,
+                    Agent.idempotency_key == idempotency_key
+                ))
+            )
             return result.scalar_one_or_none()
+
+        if db:
+            return await _query(db)
+        else:
+            async with await self.get_session() as db:
+                return await _query(db)
+
+    async def count_organization_agents_in_session(
+        self,
+        organization_id: int,
+        db_session: AsyncSession
+    ) -> int:
+        """Count agents for organization within a session (for atomic checks)"""
+        result = await db_session.execute(
+            select(func.count(Agent.id))
+            .where(and_(
+                Agent.organization_id == organization_id,
+                Agent.is_active == True
+            ))
+        )
+        return result.scalar() or 0
 
     async def get_user_agents(self, user_id: int) -> List[Agent]:
         """Get all agents for a user"""
@@ -131,17 +234,52 @@ class DatabaseService:
                 .where(Agent.user_id == user_id)
                 .order_by(desc(Agent.created_at))
             )
-            return result.scalars().all()
+            agents = result.scalars().all()
+            ensured_agents = []
+            for agent in agents:
+                ensured_agents.append(await self._ensure_agent_public_id(agent, db))
+            return ensured_agents
 
-    async def get_organization_agents(self, organization_id: int) -> List[Agent]:
-        """Get all agents for an organization"""
-        async with await self.get_session() as db:
-            result = await db.execute(
+    async def get_organization_agents(
+        self,
+        organization_id: int,
+        db: AsyncSession = None,
+        limit: int = None,
+        offset: int = 0
+    ) -> List[Agent]:
+        """Get all agents for an organization with pagination support
+
+        Args:
+            organization_id: Organization ID
+            db: Optional database session
+            limit: Maximum number of agents to return
+            offset: Number of agents to skip
+        """
+        async def _query(session: AsyncSession):
+            query = (
                 select(Agent)
+                .options(
+                    selectinload(Agent.persona),
+                    selectinload(Agent.knowledge_pack)
+                )
                 .where(and_(Agent.organization_id == organization_id, Agent.is_active == True))
                 .order_by(desc(Agent.created_at))
             )
+            if limit:
+                query = query.limit(limit).offset(offset)
+
+            result = await session.execute(query)
             return result.scalars().all()
+
+        if db:
+            return await _query(db)
+        else:
+            async with await self.get_session() as db:
+                agents = await _query(db)
+                ensured_agents = []
+                for agent in agents:
+                    ensured_agents.append(await self._ensure_agent_public_id(agent, db))
+                return ensured_agents
 
     async def update_agent(
         self,
@@ -165,6 +303,97 @@ class DatabaseService:
                 await db.refresh(agent)
 
             return agent
+
+    async def delete_agent(self, agent_id: int) -> bool:
+        """
+        Delete an agent and all associated data.
+        This includes conversations, messages, documents, and vector embeddings.
+        """
+        async with await self.get_session() as db:
+            try:
+                # Get the agent first to verify it exists
+                result = await db.execute(
+                    select(Agent).where(Agent.id == agent_id)
+                )
+                agent = result.scalar_one_or_none()
+
+                if not agent:
+                    return False
+
+                # Get all documents for this agent to clean up vector embeddings
+                documents = await self.get_agent_documents(agent_id)
+
+                # Clean up vector embeddings first
+                from .vector_store import VectorStoreService
+                vector_store = VectorStoreService()
+
+                for document in documents:
+                    if document.vector_ids:
+                        try:
+                            await vector_store.delete_vectors(document.vector_ids)
+                        except Exception as e:
+                            print(f"Warning: Failed to delete vectors for document {document.id}: {e}")
+
+                # Delete by agent_id filter (more efficient than individual deletions)
+                try:
+                    await vector_store.delete_agent_vectors(agent_id)
+                except Exception as e:
+                    print(f"Warning: Failed to delete agent vectors: {e}")
+
+                # Delete all related data in proper order (respecting foreign key constraints)
+
+                # 1. Delete messages (they reference conversations)
+                # All models are already imported at top of file
+                await db.execute(
+                    delete(Message).where(
+                        Message.conversation_id.in_(
+                            select(Conversation.id).where(Conversation.agent_id == agent_id)
+                        )
+                    )
+                )
+
+                # 2. Delete conversations
+                await db.execute(
+                    delete(Conversation).where(Conversation.agent_id == agent_id)
+                )
+
+                # 3. Delete documents
+                await db.execute(
+                    delete(Document).where(Document.agent_id == agent_id)
+                )
+
+                # 4. Delete memory entries (if they exist)
+                try:
+                    from ..models.memory import CustomerMemory
+                    await db.execute(
+                        delete(CustomerMemory).where(CustomerMemory.agent_id == agent_id)
+                    )
+                except ImportError:
+                    # Memory model might not exist yet
+                    pass
+
+                # 5. Delete escalations (if they exist)
+                try:
+                    from ..models.escalation import Escalation
+                    await db.execute(
+                        delete(Escalation).where(Escalation.agent_id == agent_id)
+                    )
+                except ImportError:
+                    # Escalation model might not exist yet
+                    pass
+
+                # 6. Finally delete the agent itself
+                await db.execute(
+                    delete(Agent).where(Agent.id == agent_id)
+                )
+
+                await db.commit()
+                return True
+
+            except Exception as e:
+                await db.rollback()
+                print(f"Error deleting agent {agent_id}: {e}")
+                return False
 
     # Document Operations
     async def create_document(
@@ -444,11 +673,9 @@ class DatabaseService:
 
             conversations_result = await db.execute(conversations_q)
             conversations = conversations_result.scalars().all()
-            total_conversations = len(conversations)
 
             messages_result = await db.execute(messages_q)
             messages = messages_result.scalars().all()
-            total_messages = len(messages)
 
             documents_result = await db.execute(documents_q)
             total_documents = len(documents_result.scalars().all())
@@ -468,14 +695,32 @@ class DatabaseService:
                 if visitor_id:
                     unique_visitors.add(visitor_id)
 
-            unique_users = len(unique_visitors)
+            # Filter conversations and messages within the time range
+            convs_in_range = [c for c in conversations if c.created_at and c.created_at >= start_time]
+
+            unique_visitors_range = set()
+            for conv in convs_in_range:
+                meta = getattr(conv, "conv_metadata", {}) or {}
+                visitor_id = meta.get("visitor_id")
+                if not visitor_id and conv.session_id:
+                    visitor_id = conv.session_id.rsplit("_", 1)[0]
+                if visitor_id:
+                    unique_visitors_range.add(visitor_id)
+
+            unique_users = len(unique_visitors_range)
 
             # Average response time (ms) computed from user->assistant pairs
             # Fallback to 0 if not computable
             response_times: List[int] = []
+            conv_ids_in_range = {c.id for c in convs_in_range}
+            messages_in_range = [
+                m for m in messages
+                if m.created_at and m.created_at >= start_time and m.conversation_id in conv_ids_in_range
+            ]
+
             # Group messages by conversation and sort
             msgs_by_conv: Dict[int, List[Message]] = {}
-            for m in messages:
+            for m in messages_in_range:
                 msgs_by_conv.setdefault(m.conversation_id, []).append(m)
             for conv_id, conv_msgs in msgs_by_conv.items():
                 conv_msgs.sort(key=lambda x: x.created_at or now)
@@ -491,7 +736,6 @@ class DatabaseService:
             avg_response_time = (sum(response_times) / len(response_times)) if response_times else 0
 
             # Conversations timeseries per day within range
-            convs_in_range = [c for c in conversations if c.created_at and c.created_at >= start_time]
             day_counts: Dict[str, int] = {}
             for i in range(days):
                 day = (start_time + timedelta(days=i)).date().isoformat()
@@ -504,25 +748,74 @@ class DatabaseService:
                 {"date": day, "count": count} for day, count in sorted(day_counts.items())
             ]
 
+            # Sentiment and source breakout
+            sentiment_counter = Counter()
+            source_counter = Counter()
+            total_tokens = 0
+            web_search_sessions = 0
+
+            for conv in convs_in_range:
+                meta = (conv.conv_metadata or {}) if hasattr(conv, "conv_metadata") else {}
+                last_sentiment = meta.get("last_sentiment")
+                label = None
+                if isinstance(last_sentiment, dict):
+                    label = last_sentiment.get("label")
+                elif isinstance(last_sentiment, str):
+                    label = last_sentiment
+                if label:
+                    normalized = label.lower()
+                    if normalized in ("positive", "neutral", "negative"):
+                        sentiment_counter[normalized] += 1
+
+                sources = meta.get("sources") or []
+                for source in sources:
+                    if isinstance(source, dict):
+                        key = source.get("source_url") or source.get("source") or source.get("title")
+                    else:
+                        key = str(source)
+                    if key:
+                        source_counter[key] += 1
+
+                total_tokens += meta.get("total_tokens", 0)
+                if meta.get("web_search_used"):
+                    web_search_sessions += 1
+
             # Naive period-over-period deltas (set to 0 by default)
             overview = {
-                "totalConversations": total_conversations,
-                "totalMessages": total_messages,
+                "totalConversations": len(convs_in_range),
+                "totalMessages": len(messages_in_range),
                 "uniqueUsers": unique_users,
                 "avgResponseTime": int(avg_response_time),
                 "conversationsChange": 0,
                 "messagesChange": 0,
                 "usersChange": 0,
                 "responseTimeChange": 0,
+                "totalTokens": total_tokens,
+                "webSearchSessions": web_search_sessions,
             }
+
+            sentiment_breakdown = {
+                "positive": sentiment_counter.get("positive", 0),
+                "neutral": sentiment_counter.get("neutral", 0),
+                "negative": sentiment_counter.get("negative", 0),
+            }
+
+            top_sources = [
+                {"source": key, "count": count}
+                for key, count in source_counter.most_common(5)
+            ]
 
             # Return both dashboard shape and legacy fields
             return {
                 "overview": overview,
                 "conversations": timeseries,
+                "sentimentBreakdown": sentiment_breakdown,
+                "topSources": top_sources,
+                "totalTokens": total_tokens,
+                "webSearchSessions": web_search_sessions,
                 # Legacy fields
-                "total_conversations": total_conversations,
-                "total_messages": total_messages,
+                "total_conversations": len(convs_in_range),
+                "total_messages": len(messages_in_range),
                 "total_documents": total_documents,
                 "recent_conversations": len(convs_in_range),
                 "agent_id": agent_id,
@@ -553,7 +846,6 @@ class DatabaseService:
             user_messages = result.scalars().all()
 
             # Top questions by exact content frequency (simple heuristic)
-            from collections import Counter
             counts = Counter()
             for m in user_messages:
                 text = (m.content or "").strip()
@@ -965,29 +1257,31 @@ async def create_demo_data():
         # Create demo user
         demo_user = await db_service.create_user(
             email="demo@aiagents.com",
-            password_hash="demo_hash",  # In real app, this would be properly hashed
+            password_hash="demo_hash",
             name="Demo User",
             plan="pro"
         )
 
         # Create demo agents
-        customer_support_agent = await db_service.create_agent(
-            user_id=demo_user.id,
-            name="Customer Support Bot",
-            description="Helps customers with product questions and support",
-            system_prompt="You are a helpful customer support assistant. Be friendly, professional, and helpful.",
-            config={"temperature": 0.7, "max_tokens": 1000},
-            widget_config={"theme": "blue", "position": "bottom-right"}
-        )
+        async with await get_db_session() as db:
+            customer_support_agent = await db_service.create_agent(
+                user_id=demo_user.id,
+                name="Customer Support Bot",
+                description="Helps customers with product questions and support",
+                system_prompt="You are a helpful customer support assistant. Be friendly, professional, and helpful.",
+                config={"temperature": 0.7, "max_tokens": 1000},
+                widget_config={"theme": "blue", "position": "bottom-right"}
+            )
 
-        sales_agent = await db_service.create_agent(
-            user_id=demo_user.id,
-            name="Sales Assistant",
-            description="Assists with product recommendations and sales inquiries",
-            system_prompt="You are a knowledgeable sales assistant. Help customers find the right products.",
-            config={"temperature": 0.8, "max_tokens": 1200},
-            widget_config={"theme": "green", "position": "bottom-left"}
-        )
+            sales_agent = await db_service.create_agent(
+                user_id=demo_user.id,
+                name="Sales Assistant",
+                description="Assists with product recommendations and sales inquiries",
+                system_prompt="You are a knowledgeable sales assistant. Help customers find the right products.",
+                config={"temperature": 0.8, "max_tokens": 1200},
+                widget_config={"theme": "green", "position": "bottom-left"}
+            )
+            await db.commit()
 
         # Create demo documents
         await db_service.create_document(

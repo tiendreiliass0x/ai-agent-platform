@@ -16,8 +16,9 @@ class DocumentResponse(BaseModel):
     url: Optional[str] = None
     error_message: Optional[str] = None
 
-    class Config:
-        from_attributes = True
+    model_config = {
+        "from_attributes": True,
+    }
 
 class URLUpload(BaseModel):
     url: str

@@ -26,6 +26,11 @@
             this.initialized = false;
             this.config = {};
             this.sessionId = null;
+            this.conversationId = null;
+            this.visitorId = null;
+            this.sessionToken = null;
+            this.sessionTokenExpiresAt = null;
+            this.sessionTokenProvider = null;
             this.isOpen = false;
             this.isTyping = false;
             this.conversationHistory = [];
@@ -57,16 +62,22 @@
             }
 
             // Validate required options
-            if (!options.agentId || !options.apiKey) {
-                console.error('YourAgent: agentId and apiKey are required');
+            if (!options.agentId) {
+                console.error('YourAgent: agentId is required');
+                return;
+            }
+
+            if (!options.sessionToken && typeof options.fetchSessionToken !== 'function') {
+                console.error('YourAgent: provide either a sessionToken or a fetchSessionToken callback');
                 return;
             }
 
             // Set configuration with defaults
             this.config = {
                 agentId: options.agentId,
-                apiKey: options.apiKey,
                 apiBaseUrl: options.apiBaseUrl || 'https://api.yourdomain.com',
+                sessionToken: options.sessionToken || null,
+                fetchSessionToken: typeof options.fetchSessionToken === 'function' ? options.fetchSessionToken : null,
 
                 // UI Configuration
                 position: options.position || 'bottom-right', // bottom-right, bottom-left, top-right, top-left
@@ -99,6 +110,12 @@
 
             this.apiBaseUrl = this.config.apiBaseUrl;
             this.sessionId = this.generateSessionId();
+            this.visitorId = options.visitorId || this.generateVisitorId();
+            this.sessionTokenProvider = this.config.fetchSessionToken;
+
+            if (this.config.sessionToken) {
+                this.setSessionToken(this.config.sessionToken, options.sessionTokenExpiresAt || null);
+            }
 
             // Initialize widget
             this.createWidget();
@@ -121,6 +138,90 @@
          */
         generateSessionId() {
             return 'session_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+        }
+
+        generateVisitorId() {
+            return 'visitor_' + Date.now() + '_' + Math.random().toString(36).substr(2, 8);
+        }
+
+        /**
+         * Set the active session token and optional expiration.
+         */
+        setSessionToken(token, expires) {
+            this.sessionToken = token || null;
+            if (!token) {
+                this.sessionTokenExpiresAt = null;
+                return;
+            }
+
+            if (!expires) {
+                this.sessionTokenExpiresAt = null;
+            } else if (expires instanceof Date) {
+                this.sessionTokenExpiresAt = expires.getTime();
+            } else if (typeof expires === 'number') {
+                // Treat numeric value as seconds from now
+                this.sessionTokenExpiresAt = Date.now() + (expires * 1000);
+            } else if (typeof expires === 'string') {
+                const parsed = Date.parse(expires);
+                this.sessionTokenExpiresAt = isNaN(parsed) ? null : parsed;
+            } else if (typeof expires === 'object' && expires !== null) {
+                const { expiresIn, expiresAt } = expires;
+                if (expiresAt) {
+                    const parsed = Date.parse(expiresAt);
+                    this.sessionTokenExpiresAt = isNaN(parsed) ? null : parsed;
+                } else if (expiresIn) {
+                    this.sessionTokenExpiresAt = Date.now() + (Number(expiresIn) * 1000);
+                } else {
+                    this.sessionTokenExpiresAt = null;
+                }
+            } else {
+                this.sessionTokenExpiresAt = null;
+            }
+        }
+
+        /**
+         * Ensure a valid session token is available (refresh if needed).
+         */
+        async ensureSessionToken(forceRefresh = false) {
+            const now = Date.now();
+            const safetyWindowMs = 5000; // Refresh slightly early
+
+            if (!forceRefresh && this.sessionToken) {
+                if (!this.sessionTokenExpiresAt || (this.sessionTokenExpiresAt - safetyWindowMs) > now) {
+                    return this.sessionToken;
+                }
+            }
+
+            if (typeof this.sessionTokenProvider === 'function') {
+                const result = await this.sessionTokenProvider();
+
+                if (!result) {
+                    throw new Error('Session token provider returned empty result');
+                }
+
+                if (typeof result === 'string') {
+                    this.setSessionToken(result, null);
+                } else if (typeof result === 'object') {
+                    this.setSessionToken(result.token, {
+                        expiresIn: result.expiresIn,
+                        expiresAt: result.expiresAt
+                    });
+                } else {
+                    throw new Error('Unsupported session token format from provider');
+                }
+
+                if (!this.sessionToken) {
+                    throw new Error('Session token provider did not supply a token');
+                }
+
+                return this.sessionToken;
+            }
+
+            if (!this.sessionToken) {
+                throw new Error('Session token required but not available');
+            }
+
+            return this.sessionToken;
         }
 
         /**
@@ -341,37 +442,23 @@
             this.trackEvent('message_sent', { message_length: message.length });
 
             try {
-                // Send to API with full context
-                const response = await this.callAPI('/api/v1/chat/message', {
-                    message: message,
-                    sessionId: this.sessionId,
-                    agentId: this.config.agentId,
-                    contextData: this.getUserContext()
-                });
+                const sessionContext = this.getUserContext();
+                const summary = await this.streamChat(message, sessionContext);
 
-                // Hide typing indicator
-                this.hideTyping();
-
-                // Add assistant response
-                this.addMessage(response.response, 'assistant', response);
-
-                // Update user profile if provided
-                if (response.context_insights) {
-                    this.updateUserProfile(response.context_insights);
+                if (summary?.customer_context?.insights) {
+                    this.updateUserProfile(summary.customer_context.insights);
                 }
 
-                // Handle any special actions
-                if (response.response_metadata && response.response_metadata.escalation_recommended) {
-                    this.handleEscalation(response.response_metadata);
+                if (summary?.customer_context?.escalation?.created) {
+                    this.handleEscalation(summary.customer_context.escalation);
                 }
 
                 this.trackEvent('response_received', {
-                    confidence: response.response_metadata?.confidence_score || 0,
-                    escalation: response.response_metadata?.escalation_recommended || false
+                    confidence: summary?.confidence_score || 0,
+                    escalation: summary?.customer_context?.escalation?.created || false
                 });
 
             } catch (error) {
-                this.hideTyping();
                 console.error('Error sending message:', error);
 
                 this.addMessage(
@@ -382,6 +469,154 @@
 
                 this.trackEvent('error', { error: error.message });
             }
+        }
+
+        async streamChat(message, sessionContext = {}) {
+            const token = await this.ensureSessionToken();
+            const payload = {
+                message,
+                conversation_id: this.conversationId,
+                user_id: this.sessionId,
+                session_context: sessionContext
+            };
+
+            const response = await fetch(`${this.apiBaseUrl}/api/v1/chat/${this.config.agentId}/stream`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': 'text/event-stream',
+                    'Authorization': `Bearer ${token}`
+                },
+                body: JSON.stringify(payload)
+            });
+
+            if (!response.ok || !response.body) {
+                this.hideTyping();
+                throw new Error(`Streaming request failed: ${response.status} ${response.statusText}`);
+            }
+
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder('utf-8');
+            let buffer = '';
+
+            const assistantEntry = this.addMessage('', 'assistant');
+            let placeholderActive = true;
+            let aggregated = '';
+            const summary = {
+                confidence_score: 0,
+                persona_applied: null,
+                sources_count: 0,
+                customer_context: {}
+            };
+
+            const removePlaceholder = () => {
+                const index = this.conversationHistory.indexOf(assistantEntry.historyEntry);
+                if (index >= 0) {
+                    this.conversationHistory.splice(index, 1);
+                }
+                if (assistantEntry.element && assistantEntry.element.parentNode) {
+                    assistantEntry.element.parentNode.removeChild(assistantEntry.element);
+                }
+            };
+
+            const commitAssistantContent = () => {
+                assistantEntry.historyEntry.content = aggregated;
+                assistantEntry.historyEntry.metadata = summary;
+            };
+
+            const processEvent = (payload) => {
+                switch (payload.type) {
+                    case 'conversation':
+                        if (payload.conversation_id) {
+                            this.conversationId = payload.conversation_id;
+                        }
+                        break;
+                    case 'metadata':
+                        if (payload.sources) {
+                            summary.sources_count = payload.sources.length;
+                        }
+                        break;
+                    case 'content':
+                        aggregated += payload.content || '';
+                        if (aggregated.length > 0) {
+                            placeholderActive = false;
+                        }
+                        assistantEntry.textElement.innerHTML = this.formatMessage(aggregated);
+                        this.scrollToBottom();
+                        break;
+                    case 'done':
+                        if (payload.conversation_id) {
+                            this.conversationId = payload.conversation_id;
+                        }
+                        summary.confidence_score = payload.confidence_score || summary.confidence_score;
+                        summary.persona_applied = payload.persona_applied || summary.persona_applied;
+                        if (payload.sources_count != null) {
+                            summary.sources_count = payload.sources_count;
+                        }
+                        if (payload.customer_context) {
+                            summary.customer_context = payload.customer_context;
+                        }
+                        break;
+                    case 'error':
+                        throw new Error(payload.message || 'Streaming error');
+                    default:
+                        break;
+                }
+            };
+
+            const processBuffer = () => {
+                let boundary = buffer.indexOf('\n\n');
+                while (boundary !== -1) {
+                    const rawEvent = buffer.slice(0, boundary).trim();
+                    buffer = buffer.slice(boundary + 2);
+
+                    if (rawEvent.startsWith('data:')) {
+                        const dataStr = rawEvent.slice(5).trim();
+                        if (dataStr) {
+                            let payload;
+                            try {
+                                payload = JSON.parse(dataStr);
+                            } catch (err) {
+                                console.warn('Invalid SSE payload', err);
+                                boundary = buffer.indexOf('\n\n');
+                                continue;
+                            }
+
+                            processEvent(payload);
+                        }
+                    }
+
+                    boundary = buffer.indexOf('\n\n');
+                }
+            };
+
+            try {
+                while (true) {
+                    const { value, done } = await reader.read();
+                    if (done) break;
+
+                    buffer += decoder.decode(value, { stream: true });
+                    processBuffer();
+                }
+
+                // Flush remaining buffer
+                const remaining = decoder.decode();
+                if (remaining) {
+                    buffer += remaining;
+                }
+                processBuffer();
+
+                commitAssistantContent();
+
+            } catch (error) {
+                removePlaceholder();
+                throw error;
+            } finally {
+                this.hideTyping();
+            }
+
+            summary["text"] = aggregated;
+            return summary;
         }
 
         /**
@@ -404,13 +639,22 @@
             this.chatMessages.appendChild(messageEl);
             this.scrollToBottom();
 
+            const textEl = messageEl.querySelector('.youragent-message-text');
+
             // Store in conversation history
-            this.conversationHistory.push({
+            const historyEntry = {
                 role: sender === 'user' ? 'user' : 'assistant',
                 content: text,
                 timestamp: new Date().toISOString(),
                 metadata: metadata
-            });
+            };
+            this.conversationHistory.push(historyEntry);
+
+            return {
+                element: messageEl,
+                textElement: textEl,
+                historyEntry
+            };
         }
 
         /**
@@ -523,11 +767,12 @@
          */
         async callAPI(endpoint, data = null, method = 'POST') {
             const url = `${this.apiBaseUrl}${endpoint}`;
+            const token = await this.ensureSessionToken();
             const options = {
                 method: method,
                 headers: {
                     'Content-Type': 'application/json',
-                    'x-api-key': this.config.apiKey
+                    'Authorization': `Bearer ${token}`
                 }
             };
 

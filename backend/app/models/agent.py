@@ -2,6 +2,7 @@ from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text, Foreign
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
 from enum import Enum as PyEnum
+import uuid
 from ..core.database import Base
 
 class AgentTier(PyEnum):
@@ -22,6 +23,7 @@ class Agent(Base):
     __tablename__ = "agents"
 
     id = Column(Integer, primary_key=True, index=True)
+    public_id = Column(String, unique=True, index=True, nullable=False, default=lambda: str(uuid.uuid4()))
     name = Column(String, nullable=False)
     description = Column(Text, nullable=True)
     system_prompt = Column(Text, nullable=True)
@@ -53,6 +55,8 @@ class Agent(Base):
 
     # API key for embedding
     api_key = Column(String, unique=True, index=True)
+
+    idempotency_key = Column(String, index=True, nullable=True)
 
     # Usage tracking
     total_conversations = Column(Integer, default=0)

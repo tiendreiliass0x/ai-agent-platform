@@ -56,8 +56,9 @@ class PersonaResponse(BaseModel):
     template_name: Optional[str]
     usage_count: int
 
-    class Config:
-        from_attributes = True
+    model_config = {
+        "from_attributes": True,
+    }
 
 
 class KnowledgePackCreate(BaseModel):
@@ -99,8 +100,9 @@ class KnowledgePackResponse(BaseModel):
     coverage_score: Optional[str]
     usage_count: int
 
-    class Config:
-        from_attributes = True
+    model_config = {
+        "from_attributes": True,
+    }
 
 
 class DomainExpertiseUpdate(BaseModel):

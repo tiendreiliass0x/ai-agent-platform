@@ -3,7 +3,7 @@ API endpoints for agent management.
 """
 
 from typing import List, Dict, Any, Optional, Union
-from fastapi import APIRouter, Depends, HTTPException, status, WebSocket
+from fastapi import APIRouter, Depends, HTTPException, status, WebSocket, Header
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
 
@@ -14,6 +14,7 @@ from ...services.agent_creation_service import agent_creation_service, AgentType
 from ...models.agent import Agent, AgentTier, DomainExpertiseType
 from ...models.user import User
 from ...services.escalation_service import escalation_service
+from ...services.agent_token_service import create_agent_session_token
 
 # Import intelligent RAG service dynamically to avoid dependency issues
 try:
@@ -32,6 +33,7 @@ router = APIRouter()
 
 class AgentResponse(BaseModel):
     id: int
+    public_id: str
     name: str
     description: str
     system_prompt: str
@@ -53,8 +55,14 @@ class AgentResponse(BaseModel):
     tool_policy: Dict[str, Any]
     grounding_mode: str
 
-    class Config:
-        from_attributes = True
+    model_config = {
+        "from_attributes": True
+    }
+
+
+class AgentSessionTokenResponse(BaseModel):
+    token: str
+    expires_in: int
 
 
 def serialize_agent(agent: Agent) -> AgentResponse:
@@ -72,6 +80,7 @@ def serialize_agent(agent: Agent) -> AgentResponse:
 
     return AgentResponse(
         id=agent.id,
+        public_id=agent.public_id,
         name=agent.name,
         description=agent.description or "",
         system_prompt=agent.system_prompt or "",
@@ -95,97 +104,37 @@ def serialize_agent(agent: Agent) -> AgentResponse:
     )
 
 
-BASE_PERSONAS: Dict[str, Dict[str, Any]] = {
-    "sales_rep": {
-        "name": "Sales Representative",
-        "system_prompt": (
-            "You are a senior B2B sales representative. Diagnose the prospect's needs, "
-            "articulate differentiated value, and recommend the next step. Always ground claims in cited sources."
-        ),
-        "tactics": {
-            "style": "executive",
-            "steps": [
-                "Qualify the prospect's role, pain, and timeline",
-                "Frame business impact with concise value bullets",
-                "Cite relevant proof points or customer examples",
-                "Close with a clear next step or CTA"
-            ],
-            "tips": [
-                "Mirror the customer's language and priorities",
-                "Handle objections with empathy and data",
-                "Highlight ROI or cost savings when possible"
-            ]
-        }
-    },
-    "solution_engineer": {
-        "name": "Solutions Engineer",
-        "system_prompt": (
-            "You are a pragmatic solutions engineer. Map requirements to architecture, outline trade-offs, "
-            "and provide implementation guidance grounded in cited sources."
-        ),
-        "tactics": {
-            "style": "technical",
-            "steps": [
-                "Clarify goals, constraints, and existing stack",
-                "Recommend an architecture with annotated diagram steps",
-                "Surface trade-offs, risks, and mitigation strategies",
-                "Outline a minimal viable implementation plan"
-            ],
-            "tips": [
-                "Cite limits or SLAs for any critical component",
-                "Offer integration checklists or pseudo-code when helpful"
-            ]
-        }
-    },
-    "support_expert": {
-        "name": "Support Expert",
-        "system_prompt": (
-            "You are a tier-2 support expert. Diagnose issues methodically, confirm reproduction, "
-            "and present precise resolutions. Cite sources for known fixes or knowledge base articles."
-        ),
-        "tactics": {
-            "style": "concise",
-            "steps": [
-                "Confirm environment and version details",
-                "Gather relevant logs or telemetry",
-                "Identify known issues or root causes",
-                "Provide step-by-step resolution and prevention tips"
-            ],
-            "tips": [
-                "If uncertain, offer hypotheses with required validation",
-                "List escalation criteria when self-service is insufficient"
-            ]
-        }
-    },
-    "domain_specialist": {
-        "name": "Domain Specialist",
-        "system_prompt": (
-            "You are a domain mentor. Provide best practices, tips, and actionable insights drawn from curated knowledge "
-            "and trusted sources."
-        ),
-        "tactics": {
-            "style": "friendly",
-            "steps": [
-                "Diagnose the user's current level",
-                "Share practical tips and guardrails",
-                "Suggest next actions or resources",
-                "Offer advanced tricks when appropriate"
-            ],
-            "tips": [
-                "Use relatable analogies when introducing new concepts",
-                "Encourage experimentation with clear boundaries"
-            ]
-        }
-    }
-}
+def _extract_agent_api_key(authorization_header: Optional[str], explicit_key: Optional[str]) -> Optional[str]:
+    if explicit_key and explicit_key.strip():
+        return explicit_key.strip()
+    if authorization_header and authorization_header.startswith("Bearer "):
+        return authorization_header.split(" ", 1)[1].strip()
+    return None
 
-PERSONA_ENUM_MAP: Dict[str, DomainExpertiseType] = {
-    "sales_rep": DomainExpertiseType.sales_rep,
-    "solution_engineer": DomainExpertiseType.solution_engineer,
-    "support_expert": DomainExpertiseType.support_expert,
-    "domain_specialist": DomainExpertiseType.domain_specialist,
-    "product_expert": DomainExpertiseType.product_expert,
-}
+
+@router.post("/public/{agent_public_id}/session-token", response_model=AgentSessionTokenResponse)
+async def issue_agent_session_token(
+    agent_public_id: str,
+    authorization: Optional[str] = Header(default=None),
+    agent_api_key_header: Optional[str] = Header(default=None, alias="X-Agent-API-Key"),
+):
+    agent = await db_service.get_agent_by_public_id(agent_public_id)
+    if not agent:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
+
+    provided_key = _extract_agent_api_key(authorization, agent_api_key_header)
+    if not provided_key or provided_key != agent.api_key:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid or missing agent API key")
+
+    ttl_seconds = 300
+    token = create_agent_session_token(agent.public_id, ttl_seconds)
+    return AgentSessionTokenResponse(token=token, expires_in=ttl_seconds)
+
+
+# Import shared persona configuration
+from ...config.personas import BASE_PERSONAS, get_persona_enum_map
+
+PERSONA_ENUM_MAP = get_persona_enum_map()
 
 GROUNDING_MODES = {"strict", "blended"}
 
@@ -199,15 +148,47 @@ class EnhancedAgentResponse(BaseModel):
     recommendations: List[Dict[str, Any]]
 
 
+class WidgetConfig(BaseModel):
+    """Widget configuration schema with validation"""
+    theme: Optional[str] = "modern"
+    position: Optional[str] = "bottom-right"
+    size: Optional[str] = "medium"
+    animation: Optional[str] = "slide-up"
+    branding: Optional[bool] = True
+    sound_enabled: Optional[bool] = False
+    typing_indicator: Optional[bool] = True
+    quick_replies: Optional[bool] = True
+    welcome_message: Optional[str] = None
+    custom_css: Optional[str] = None
+
+    class Config:
+        extra = "allow"  # Allow additional custom fields
+
+
+class AgentConfig(BaseModel):
+    """Agent configuration schema with validation"""
+    model: Optional[str] = "gemini-2.0-flash-exp"
+    temperature: Optional[float] = 0.7
+    max_tokens: Optional[int] = 1000
+    memory_enabled: Optional[bool] = True
+    context_optimization: Optional[bool] = True
+    response_time_target: Optional[float] = 2.0
+    quality_threshold: Optional[float] = 0.8
+
+    class Config:
+        extra = "allow"
+
+
 class AgentCreate(BaseModel):
     name: str
     description: str
     system_prompt: str = ""
-    config: Dict[str, Any] = {}
-    widget_config: Dict[str, Any] = {}
+    config: Optional[AgentConfig] = None
+    widget_config: Optional[WidgetConfig] = None
     agent_type: AgentType = AgentType.CUSTOM
     industry: IndustryType = IndustryType.GENERAL
     auto_optimize: bool = True
+    idempotency_key: Optional[str] = None  # Prevent duplicate creations
 
 
 class AgentUpdate(BaseModel):
@@ -281,10 +262,18 @@ async def get_industries():
 @router.get("/", response_model=List[AgentResponse])
 async def get_agents(
     organization_id: int,
+    limit: int = 50,
+    offset: int = 0,
     current_user = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
-    """Get all agents for an organization"""
+    """Get all agents for an organization with pagination
+
+    Args:
+        organization_id: Organization ID
+        limit: Maximum number of agents to return (default 50, max 100)
+        offset: Number of agents to skip for pagination
+    """
     try:
         # Verify user has access to organization using new auth system
         from ...core.auth import verify_organization_access
@@ -294,7 +283,13 @@ async def get_agents(
                 detail="Access denied - user does not have access to this organization"
             )
 
-        agents = await db_service.get_organization_agents(organization_id)
+        # Enforce max limit
+        limit = min(limit, 100)
+
+        # Use provided db session for better performance
+        agents = await db_service.get_organization_agents(
+            organization_id, db=db, limit=limit, offset=offset
+        )
         return [serialize_agent(agent) for agent in agents]
     except HTTPException:
         raise
@@ -313,7 +308,8 @@ async def get_agent(
 ):
     """Get a specific agent by ID"""
     try:
-        agent = await db_service.get_agent_by_id(agent_id)
+        # Use provided db session
+        agent = await db_service.get_agent_by_id(agent_id, db=db)
         if not agent:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -344,8 +340,30 @@ async def create_agent(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
-    """Create a new agent with intelligent optimization and templates"""
+    """Create a new agent with intelligent optimization and templates
+
+    Supports idempotency via idempotency_key to prevent duplicate agent creations.
+    """
     try:
+        # Check idempotency key
+        if agent_data.idempotency_key:
+            existing_agent = await db_service.get_agent_by_idempotency_key(
+                user_id=current_user.id,
+                organization_id=organization_id,
+                idempotency_key=agent_data.idempotency_key,
+                db=db
+            )
+            if existing_agent:
+                # Return existing agent (idempotent response)
+                return EnhancedAgentResponse(
+                    agent=serialize_agent(existing_agent),
+                    embed_code=agent_creation_service._generate_embed_code(existing_agent),
+                    setup_guide={},
+                    optimization_applied=False,
+                    template_used=None,
+                    recommendations=[]
+                )
+
         # Verify user can manage agents in organization
         user_org = await db_service.get_user_organization(current_user.id, organization_id)
         if not user_org or not user_org.can_manage_agents:
@@ -362,15 +380,12 @@ async def create_agent(
                 detail="Organization not found"
             )
 
-        # Check agent limits
-        current_agent_count = await db_service.count_organization_agents(organization_id)
-        if organization.max_agents != -1 and current_agent_count >= organization.max_agents:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Organization has reached agent limit"
-            )
+        # Convert Pydantic models to dicts for service layer
+        config_dict = agent_data.config.dict() if agent_data.config else {}
+        widget_config_dict = agent_data.widget_config.dict() if agent_data.widget_config else {}
 
-        # Use advanced agent creation service
+        # Use advanced agent creation service with atomic limit checking
+        # The limit check is now done inside the transaction to prevent race conditions
         creation_result = await agent_creation_service.create_intelligent_agent(
             user_id=current_user.id,
             organization_id=organization_id,
@@ -378,12 +393,15 @@ async def create_agent(
                 "name": agent_data.name,
                 "description": agent_data.description,
                 "system_prompt": agent_data.system_prompt,
-                "config": agent_data.config,
-                "widget_config": agent_data.widget_config
+                "config": config_dict,
+                "widget_config": widget_config_dict,
+                "idempotency_key": agent_data.idempotency_key
             },
             agent_type=agent_data.agent_type,
             industry=agent_data.industry,
-            auto_optimize=agent_data.auto_optimize
+            auto_optimize=agent_data.auto_optimize,
+            max_agents=organization.max_agents,
+            db_session=db
         )
 
         agent = creation_result["agent"]
@@ -452,6 +470,63 @@ async def update_agent(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error updating agent: {str(e)}"
+        )
+
+
+@router.delete("/{agent_id}")
+async def delete_agent(
+    agent_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Delete an agent and all associated data.
+
+    This operation is irreversible and will delete:
+    - The agent itself
+    - All conversations and messages
+    - All documents and vector embeddings
+    - All memory entries
+    - All escalations
+
+    Only the agent owner can delete an agent.
+    """
+    try:
+        # Verify user owns this agent
+        existing_agent = await db_service.get_agent_by_id(agent_id)
+        if not existing_agent:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Agent not found"
+            )
+
+        if existing_agent.user_id != current_user.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied - you can only delete your own agents"
+            )
+
+        # Perform the deletion
+        success = await db_service.delete_agent(agent_id)
+
+        if not success:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to delete agent"
+            )
+
+        return {
+            "success": True,
+            "message": f"Agent {existing_agent.name} has been permanently deleted",
+            "agent_id": agent_id
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error deleting agent: {str(e)}"
         )
 
 

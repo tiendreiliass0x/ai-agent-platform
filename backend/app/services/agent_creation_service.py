@@ -4,12 +4,15 @@ Intelligent agent creation with templates, optimization, and validation.
 """
 
 import asyncio
+import logging
 from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
 from enum import Enum
 
 from app.services.gemini_service import gemini_service
 from app.services.database_service import db_service
+
+logger = logging.getLogger(__name__)
 
 
 class AgentType(str, Enum):
@@ -50,31 +53,80 @@ class AgentCreationService:
         agent_data: Dict[str, Any],
         agent_type: AgentType = AgentType.CUSTOM,
         industry: IndustryType = IndustryType.GENERAL,
-        auto_optimize: bool = True
+        auto_optimize: bool = True,
+        max_agents: int = -1,
+        db_session = None
     ) -> Dict[str, Any]:
-        """Create an agent with intelligent optimization"""
+        """Create an agent with intelligent optimization
+
+        Args:
+            user_id: ID of user creating the agent
+            organization_id: ID of organization owning the agent
+            agent_data: Agent configuration data
+            agent_type: Type of agent (e.g., customer_support, sales_assistant)
+            industry: Industry for optimization (e.g., saas, fintech)
+            auto_optimize: Whether to optimize prompt in background (default True)
+            max_agents: Organization's max agent limit (-1 = unlimited)
+            db_session: Database session (REQUIRED for atomic operations)
+
+        Returns:
+            Dict containing agent, embed_code, setup_guide, etc.
+
+        Raises:
+            ValueError: If db_session is not provided
+            HTTPException: If organization limit exceeded
+        """
+        from fastapi import HTTPException, status
 
         # 1. Apply template if specified
         if agent_type != AgentType.CUSTOM:
             agent_data = self._apply_agent_template(agent_data, agent_type, industry)
 
-        # 2. Optimize system prompt using AI
-        if auto_optimize:
-            agent_data = await self._optimize_system_prompt(agent_data, industry)
-
-        # 3. Validate and enhance configuration
+        # 2. Validate and enhance configuration
         agent_data = self._optimize_agent_config(agent_data, agent_type, industry)
 
-        # 4. Create agent with enhanced metadata
+        # 3. Validate db_session is provided
+        if not db_session:
+            raise ValueError("db_session is required for agent creation (for atomic limit checking)")
+
+        # 4. Atomic limit check inside transaction
+        if max_agents != -1:
+            current_count = await db_service.count_organization_agents_in_session(
+                organization_id, db_session
+            )
+            if current_count >= max_agents:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Organization has reached agent limit ({max_agents})"
+                )
+
+        # 5. Create agent within transaction
         agent = await db_service.create_agent(
+            db=db_session,
             user_id=user_id,
             organization_id=organization_id,
             name=agent_data["name"],
             description=agent_data["description"],
             system_prompt=agent_data["system_prompt"],
             config=agent_data["config"],
-            widget_config=agent_data["widget_config"]
+            widget_config=agent_data["widget_config"],
+            idempotency_key=agent_data.get("idempotency_key")
         )
+
+        # 4. Trigger background optimization if requested
+        optimization_task = None
+        if auto_optimize and agent:
+            logger.info(f"Scheduling background optimization for agent {agent.id}")
+            # Fire and forget - optimization happens after response is sent
+            optimization_task = asyncio.create_task(
+                self.optimize_agent_prompt_background(
+                    agent_id=agent.id,
+                    agent_name=agent.name,
+                    agent_description=agent.description,
+                    current_prompt=agent.system_prompt,
+                    industry=industry
+                )
+            )
 
         # 5. Generate embedding code and setup instructions
         embed_code = self._generate_embed_code(agent)
@@ -84,7 +136,8 @@ class AgentCreationService:
             "agent": agent,
             "embed_code": embed_code,
             "setup_guide": setup_guide,
-            "optimization_applied": auto_optimize,
+            "optimization_applied": False,  # Optimization happens in background
+            "optimization_pending": auto_optimize,
             "template_used": agent_type.value if agent_type != AgentType.CUSTOM else None,
             "recommendations": self._generate_recommendations(agent_data, agent_type, industry)
         }
@@ -124,7 +177,7 @@ class AgentCreationService:
         agent_data: Dict[str, Any],
         industry: IndustryType
     ) -> Dict[str, Any]:
-        """Use AI to optimize the system prompt"""
+        """Use AI to optimize the system prompt synchronously"""
 
         try:
             optimization_prompt = f"""
@@ -156,10 +209,63 @@ Return only the optimized system prompt, no explanations.
             agent_data["_optimization_applied"] = True
 
         except Exception as e:
-            print(f"Failed to optimize system prompt: {e}")
+            logger.error(f"Failed to optimize system prompt: {e}")
             # Continue with original prompt if optimization fails
 
         return agent_data
+
+    async def optimize_agent_prompt_background(
+        self,
+        agent_id: int,
+        agent_name: str,
+        agent_description: str,
+        current_prompt: str,
+        industry: IndustryType
+    ) -> None:
+        """Optimize agent system prompt in the background after creation
+
+        This allows the agent creation endpoint to return immediately while
+        optimization happens asynchronously.
+        """
+        try:
+            logger.info(f"Starting background optimization for agent {agent_id}")
+
+            optimization_prompt = f"""
+You are an expert AI prompt engineer. Optimize this agent system prompt for maximum effectiveness.
+
+Current Details:
+- Agent Name: {agent_name}
+- Description: {agent_description}
+- Industry: {industry.value}
+- Current System Prompt: {current_prompt}
+
+Please optimize the system prompt following these guidelines:
+1. Be specific about the agent's role and expertise
+2. Include industry-specific knowledge and terminology
+3. Set clear behavioral expectations
+4. Add guardrails for appropriate responses
+5. Make it concise but comprehensive (max 500 words)
+
+Return only the optimized system prompt, no explanations.
+"""
+
+            optimized_prompt = await gemini_service.generate_response(
+                prompt=optimization_prompt,
+                temperature=0.3,
+                max_tokens=800
+            )
+
+            # Update agent with optimized prompt
+            await db_service.update_agent(
+                agent_id,
+                system_prompt=optimized_prompt.strip()
+            )
+
+            logger.info(f"Successfully optimized prompt for agent {agent_id}")
+
+        except Exception as e:
+            logger.error(f"Background optimization failed for agent {agent_id}: {e}")
+            # Fail silently - agent is already created with original prompt
 
     def _optimize_agent_config(
         self,
@@ -251,25 +357,33 @@ Return only the optimized system prompt, no explanations.
         return agent_data
 
     def _generate_embed_code(self, agent) -> str:
-        """Generate JavaScript embed code for the agent"""
+        """Generate JavaScript embed code for the agent
+
+        SECURITY: Uses public_id instead of internal ID and excludes API key.
+        The widget will authenticate using session tokens obtained server-side.
+        """
+        import json
+
+        # Safely serialize widget config as JSON
+        widget_config_json = json.dumps(agent.widget_config or {})
 
         return f"""<!-- AI Agent Embed Code -->
-<script>
-  (function() {{
-    var script = document.createElement('script');
-    script.src = 'https://cdn.yourdomain.com/agent-widget.js';
-    script.async = true;
-    script.onload = function() {{
-      YourAgent.init({{
-        agentId: '{agent.id}',
-        apiKey: '{agent.api_key}',
-        config: {agent.widget_config}
-      }});
-    }};
-    document.head.appendChild(script);
-  }})();
-</script>
-<!-- End AI Agent Embed Code -->"""
+        <script>
+        (function() {{
+            var script = document.createElement('script');
+            script.src = 'https://cdn.yourdomain.com/agent-widget.js';
+            script.async = true;
+            script.onload = function() {{
+            YourAgent.init({{
+                agentPublicId: '{agent.public_id}',
+                config: {widget_config_json}
+            }});
+            }};
+            document.head.appendChild(script);
+        }})();
+        </script>
+        <!-- End AI Agent Embed Code -->
+        <!-- Note: The widget will authenticate using your server-side API key to obtain session tokens -->"""
 
     def _generate_setup_guide(
         self,

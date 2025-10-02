@@ -16,6 +16,7 @@ from ..models.customer_memory import CustomerMemory, MemoryType
 from ..models.conversation import Conversation
 from ..models.agent import Agent
 from .memory_service import memory_service
+from .langextract_service import lang_extract_service
 
 
 @dataclass
@@ -52,6 +53,8 @@ class CustomerContext:
     # Context Quality
     confidence_score: float = 0.0  # How confident we are in our understanding
     data_sources: List[str] = None  # Where our data comes from
+    sentiment: Optional[Dict[str, Any]] = None
+    named_entities: List[Dict[str, Any]] = None
 
 
 @dataclass
@@ -132,6 +135,21 @@ class CustomerDataService:
         else:
             # Create new profile
             return await self._create_new_customer_profile(visitor_id, agent_id, session_context, interaction_data, db)
+
+    async def enrich_with_langextract(
+        self,
+        message: str,
+        customer_context: CustomerContext
+    ) -> Optional[Dict[str, Any]]:
+        analysis = await lang_extract_service.analyze_text(message)
+        if analysis:
+            customer_context.sentiment = analysis.sentiment
+            customer_context.named_entities = analysis.entities
+            return {
+                "sentiment": analysis.sentiment,
+                "entities": analysis.entities,
+            }
+        return None
 
     async def _get_existing_customer_profile(
         self,

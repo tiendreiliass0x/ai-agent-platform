@@ -1,10 +1,19 @@
 import asyncio
-from typing import List, Any
+import hashlib
+import json
+from typing import List, Any, Optional
 import openai
 from sentence_transformers import SentenceTransformer
 import numpy as np
 
 from app.core.config import settings
+
+# Optional Redis import
+try:
+    import redis.asyncio as redis
+    REDIS_AVAILABLE = True
+except ImportError:
+    REDIS_AVAILABLE = False
 
 class EmbeddingService:
     def __init__(self):
@@ -15,17 +24,86 @@ class EmbeddingService:
         # Fallback to sentence-transformers if OpenAI is not available
         self.fallback_model = None
 
+        # Initialize Redis cache if available
+        self.redis_client = None
+        if REDIS_AVAILABLE and settings.REDIS_URL:
+            try:
+                self.redis_client = redis.from_url(
+                    settings.REDIS_URL,
+                    encoding="utf-8",
+                    decode_responses=True
+                )
+            except Exception as e:
+                print(f"Failed to connect to Redis: {e}, falling back to in-memory cache")
+                self.redis_client = None
+
+        # In-memory fallback cache
+        self.memory_cache = EmbeddingCache()
+
     async def generate_embeddings(self, texts: List[str]) -> List[List[float]]:
-        """Generate embeddings for a list of texts"""
+        """Generate embeddings for a list of texts with caching"""
+        # Check cache first for single queries (optimization for RAG queries)
+        if len(texts) == 1:
+            cached = await self._get_cached_embedding(texts[0])
+            if cached is not None:
+                return [cached]
+
+        # Generate embeddings
         try:
             if settings.OPENAI_API_KEY:
-                return await self._generate_openai_embeddings(texts)
+                embeddings = await self._generate_openai_embeddings(texts)
             else:
-                return await self._generate_local_embeddings(texts)
+                embeddings = await self._generate_local_embeddings(texts)
+
+            # Cache single query results
+            if len(texts) == 1 and len(embeddings) == 1:
+                await self._cache_embedding(texts[0], embeddings[0])
+
+            return embeddings
+
         except Exception as e:
             print(f"Error generating embeddings: {e}")
             # Fallback to local model
             return await self._generate_local_embeddings(texts)
+
+    async def _get_cached_embedding(self, text: str) -> Optional[List[float]]:
+        """Get cached embedding for text"""
+        cache_key = self._get_cache_key(text)
+
+        # Try Redis first
+        if self.redis_client:
+            try:
+                cached_str = await self.redis_client.get(cache_key)
+                if cached_str:
+                    return json.loads(cached_str)
+            except Exception as e:
+                print(f"Redis cache get failed: {e}")
+
+        # Fallback to memory cache
+        return self.memory_cache.get(text)
+
+    async def _cache_embedding(self, text: str, embedding: List[float]):
+        """Cache embedding for text"""
+        cache_key = self._get_cache_key(text)
+
+        # Try Redis first (TTL: 1 hour)
+        if self.redis_client:
+            try:
+                await self.redis_client.setex(
+                    cache_key,
+                    3600,  # 1 hour TTL
+                    json.dumps(embedding)
+                )
+            except Exception as e:
+                print(f"Redis cache set failed: {e}")
+
+        # Always cache in memory as fallback
+        self.memory_cache.set(text, embedding)
+
+    def _get_cache_key(self, text: str) -> str:
+        """Generate cache key for text"""
+        text_hash = hashlib.sha256(text.encode()).hexdigest()
+        return f"embedding:{self.model_name}:{text_hash}"
 
     async def _generate_openai_embeddings(self, texts: List[str]) -> List[List[float]]:
         """Generate embeddings using OpenAI API"""

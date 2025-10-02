@@ -44,6 +44,11 @@ lint:
 	cd backend && ruff check .
 	npm run lint
 
+# Security audit
+security-check:
+	cd backend && bandit -q -r app -x app/tests,app/__pycache__
+	@echo "Bandit security scan completed"
+
 # Clean up
 clean:
 	docker-compose down -v

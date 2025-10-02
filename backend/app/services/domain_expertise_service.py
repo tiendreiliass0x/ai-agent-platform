@@ -11,6 +11,7 @@ from app.services.database_service import db_service
 from app.services.document_processor import DocumentProcessor
 from app.services.gemini_service import gemini_service
 from app.services.web_search_service import web_search_service
+from app.services.reranker_service import reranker_service
 from app.core.logging_config import get_logger, LoggerMixin
 
 logger = get_logger(__name__)
@@ -76,7 +77,7 @@ class DomainExpertiseService(LoggerMixin):
             limit=50
         )
 
-        # 2. Rerank with recency and source credibility
+        # 2. Rerank with semantic cross-encoder + recency adjustments
         ranked_candidates = await self._rerank_candidates(candidates, message, knowledge_pack)
 
         # 3. Grounding guard - check if we have sufficient support
@@ -166,20 +167,57 @@ class DomainExpertiseService(LoggerMixin):
     ) -> List[RetrievalCandidate]:
         """Rerank with cross-encoder and freshness boost"""
 
-        # Simple reranking for now - could add cross-encoder later
-        def rerank_score(candidate: RetrievalCandidate) -> float:
-            score = candidate.score
+        if not candidates:
+            return []
 
-            # Recency boost
-            if candidate.timestamp:
-                days_old = (datetime.now() - candidate.timestamp).days
-                recency_boost = max(0, 1.0 - (days_old / 30))  # Decay over 30 days
-                score += recency_boost * 0.1
+        indexed_candidates = {
+            idx: candidate for idx, candidate in enumerate(candidates)
+        }
 
-            return score
+        items = [
+            {
+                "text": candidate.content,
+                "score": candidate.score,
+                "metadata": {"candidate_index": idx}
+            }
+            for idx, candidate in indexed_candidates.items()
+            if candidate.content
+        ]
 
-        candidates.sort(key=rerank_score, reverse=True)
-        return candidates[:12]  # Top 12 for synthesis
+        reranked_dicts = await reranker_service.rerank(query, items, top_k=12)
+
+        enriched: List[RetrievalCandidate] = []
+        for item in reranked_dicts:
+            metadata = item.get("metadata") or {}
+            candidate_idx = metadata.get("candidate_index")
+            original = indexed_candidates.get(candidate_idx)
+            if original is None:
+                continue
+
+            combined_score = item.get("combined_score")
+            rerank_score = item.get("rerank_score")
+            base_score = original.score
+            final_score = combined_score or rerank_score or base_score
+
+            if original.timestamp:
+                days_old = (datetime.now() - original.timestamp).days
+                recency_boost = max(0.0, 1.0 - (days_old / 30)) * 0.1
+                final_score += recency_boost
+
+            enriched.append(
+                RetrievalCandidate(
+                    doc_id=original.doc_id,
+                    content=original.content,
+                    score=final_score,
+                    source_url=original.source_url,
+                    doc_title=original.doc_title,
+                    timestamp=original.timestamp,
+                    source_type=original.source_type,
+                )
+            )
+
+        enriched.sort(key=lambda cand: cand.score, reverse=True)
+        return enriched[:12]
 
     def _has_sufficient_support(
         self,

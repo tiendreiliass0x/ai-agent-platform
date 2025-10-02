@@ -13,6 +13,7 @@
     "dev:backend": "cd backend && python -m uvicorn main:app --reload",
     "build": "npm run build --workspace=frontend",
     "test": "npm run test --workspaces && cd backend && pytest",
+    "test:ci": "npm run test:ci --workspaces && cd backend && pytest -q",
     "lint": "npm run lint --workspaces && cd backend && ruff check .",
     "clean": "rm -rf node_modules && npm run clean --workspaces"
   },

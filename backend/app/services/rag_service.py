@@ -8,6 +8,8 @@ from app.services.document_processor import DocumentProcessor
 from app.services.embedding_service import EmbeddingService
 from app.services.gemini_service import gemini_service
 from app.services.personality_service import personality_service
+from app.services.context_compression import compress_context_snippet
+from app.services.reranker_service import reranker_service
 
 class RAGService:
     def __init__(self):
@@ -15,6 +17,7 @@ class RAGService:
         self.embedding_service = EmbeddingService()
         self.openai_client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY) if settings.OPENAI_API_KEY else None
         self.gemini_service = gemini_service  # Use Gemini as primary LLM
+        self.reranker = reranker_service
 
     async def generate_response(
         self,
@@ -28,11 +31,18 @@ class RAGService:
         """Generate a response using RAG (Retrieval-Augmented Generation)"""
 
         try:
-            # Step 1: Retrieve relevant context
+            # Step 1: Retrieve relevant context (increased from 5 to 20 for better recall)
             context_results = await self.document_processor.search_similar_content(
                 query=query,
                 agent_id=agent_id,
-                top_k=5
+                top_k=20  # Retrieve more candidates for reranking
+            )
+
+            # Step 2: Rerank to get best 5 chunks (improved precision)
+            context_results = await self.reranker.rerank(
+                query,
+                context_results or [],
+                top_k=5  # Final refined set
             )
 
             # Step 2: Prepare context for LLM
@@ -93,20 +103,134 @@ class RAGService:
                 "error": str(e)
             }
 
-    def _format_context(self, context_results: List[Dict[str, Any]]) -> str:
-        """Format retrieved context for the LLM"""
+    async def retrieve_context(
+        self,
+        query: str,
+        agent_id: int,
+        top_k: int = 5,
+        *,
+        return_full: bool = False
+    ) -> List[Any]:
+        """Retrieve similar knowledge base chunks for a given query.
+
+        Args:
+            query: Natural language query to search with.
+            agent_id: Agent whose knowledge base should be queried.
+            top_k: Maximum number of chunks to return.
+            return_full: When True, include score and metadata for each chunk.
+
+        Returns:
+            List of chunk texts by default, or rich dictionaries when
+            ``return_full`` is True. Falls back gracefully if no results are
+            available or an error occurs.
+        """
+
+        try:
+            raw_results = await self.document_processor.search_similar_content(
+                query=query,
+                agent_id=agent_id,
+                top_k=top_k
+            )
+        except Exception as exc:
+            print(f"Error retrieving context for query '{query}': {exc}")
+            return []
+
+        normalized_results: List[Dict[str, Any]] = []
+
+        for result in raw_results or []:
+            if isinstance(result, dict):
+                text = result.get("text") or ""
+                score = result.get("score")
+                metadata = result.get("metadata") or {}
+            else:
+                # Fallback to simple string representation
+                text = str(result)
+                score = None
+                metadata = {}
+
+            chunk_id = metadata.get("chunk_id")
+
+            normalized_results.append(
+                {
+                    "chunk_id": chunk_id,
+                    "text": text,
+                    "score": score,
+                    "metadata": metadata
+                }
+            )
+
+        if return_full:
+            return await self.reranker.rerank(query, normalized_results, top_k=top_k)
+
+        simple_results: List[str] = []
+        reranked = await self.reranker.rerank(query, normalized_results, top_k=top_k)
+        for item in reranked:
+            if item["text"]:
+                simple_results.append(item["text"])
+            elif item["chunk_id"]:
+                simple_results.append(item["chunk_id"])
+
+        return simple_results
+
+    def _estimate_tokens(self, text: str) -> int:
+        """Estimate token count for text (rough approximation: 1 token ≈ 4 chars)"""
+        return len(text) // 4
+
+    def _format_context(
+        self,
+        context_results: List[Dict[str, Any]],
+        max_tokens: int = 2000
+    ) -> str:
+        """Format retrieved context for the LLM with token budget management
+
+        Args:
+            context_results: List of search results sorted by relevance
+            max_tokens: Maximum tokens to use for context (default: 2000)
+
+        Returns:
+            Formatted context string that fits within token budget
+        """
         if not context_results:
             return "No relevant context found."
 
         formatted_context = "Relevant information from knowledge base:\n\n"
+        header_tokens = self._estimate_tokens(formatted_context)
+        tokens_used = header_tokens
+        chunks_included = 0
 
-        for i, result in enumerate(context_results):
+        # Sort by relevance score (highest first)
+        sorted_results = sorted(
+            context_results,
+            key=lambda x: x.get("score", 0),
+            reverse=True
+        )
+
+        for i, result in enumerate(sorted_results):
             score = result.get("score", 0)
             text = result.get("text", "")
-            source = result.get("metadata", {}).get("source", "Unknown")
+            metadata = result.get("metadata", {}) or {}
+            source = metadata.get("source") or metadata.get("source_url") or "Unknown"
+            compressed_text = compress_context_snippet(text, metadata)
 
-            formatted_context += f"[Context {i+1}] (Relevance: {score:.2f}) from {source}:\n"
-            formatted_context += f"{text}\n\n"
+            # Format this chunk
+            chunk_header = f"[Context {chunks_included + 1}] (Relevance: {score:.2f}) from {source}:\n"
+            chunk_content = f"{compressed_text}\n\n"
+            chunk_full = chunk_header + chunk_content
+
+            # Check if adding this chunk would exceed budget
+            chunk_tokens = self._estimate_tokens(chunk_full)
+
+            if tokens_used + chunk_tokens > max_tokens:
+                # Skip remaining chunks if budget exhausted
+                break
+
+            formatted_context += chunk_full
+            tokens_used += chunk_tokens
+            chunks_included += 1
+
+        # Add summary if some chunks were skipped
+        if chunks_included < len(sorted_results):
+            formatted_context += f"\n[Note: {len(sorted_results) - chunks_included} additional sources available but omitted due to context length]\n"
 
         return formatted_context
 
@@ -238,11 +362,18 @@ Guidelines for using this information:
         """Generate a streaming response using RAG with Gemini"""
 
         try:
-            # Step 1: Retrieve context (same as non-streaming)
+            # Step 1: Retrieve context (increased from 5 to 20 for better recall)
             context_results = await self.document_processor.search_similar_content(
                 query=query,
                 agent_id=agent_id,
-                top_k=5
+                top_k=20  # Retrieve more candidates for reranking
+            )
+
+            # Step 1.5: Rerank to get best 5 chunks
+            context_results = await self.reranker.rerank(
+                query,
+                context_results or [],
+                top_k=5  # Final refined set
             )
 
             # Step 2: Prepare context and personality enhancement

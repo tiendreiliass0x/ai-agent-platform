@@ -11,8 +11,9 @@ class UserResponse(BaseModel):
     full_name: str = None
     is_active: bool
 
-    class Config:
-        from_attributes = True
+    model_config = {
+        "from_attributes": True,
+    }
 
 @router.get("/me", response_model=UserResponse)
 async def get_current_user(

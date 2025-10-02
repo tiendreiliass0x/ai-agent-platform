@@ -1,7 +1,7 @@
 import asyncio
 from typing import List, Dict, Any, Optional, Union
 import uuid
-from pinecone import Pinecone
+from pinecone import Pinecone, ServerlessSpec
 import numpy as np
 
 from app.core.config import settings
@@ -10,35 +10,50 @@ class VectorStoreService:
     def __init__(self):
         self.pc = None
         self.index = None
-        self._initialize_pinecone()
+        self._initialized = False
 
-    def _initialize_pinecone(self):
-        """Initialize Pinecone client and index"""
+    async def _initialize_pinecone(self):
+        """Lazy initialize Pinecone client and index"""
+        if self._initialized:
+            return True
+
         if not settings.PINECONE_API_KEY:
             print("Warning: Pinecone API key not set. Vector operations will use mock data.")
-            return
+            self._initialized = True
+            return False
 
         try:
             self.pc = Pinecone(api_key=settings.PINECONE_API_KEY)
 
-            # Check if index exists, create if not
-            if settings.PINECONE_INDEX_NAME not in self.pc.list_indexes().names():
-                self.pc.create_index(
-                    name=settings.PINECONE_INDEX_NAME,
-                    dimension=3072,  # OpenAI text-embedding-3-large dimension
-                    metric="cosine",
-                    spec=pinecone.ServerlessSpec(
-                        cloud="aws",
-                        region="us-east-1"
+            # Check if index exists, create if not (this might take time)
+            existing_indexes = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: [index.name for index in self.pc.list_indexes()]
+            )
+
+            if settings.PINECONE_INDEX_NAME not in existing_indexes:
+                await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda: self.pc.create_index(
+                        name=settings.PINECONE_INDEX_NAME,
+                        dimension=3072,  # OpenAI text-embedding-3-large dimension
+                        metric="cosine",
+                        spec=ServerlessSpec(
+                            cloud="aws",
+                            region="us-east-1"
+                        )
                     )
                 )
 
             self.index = self.pc.Index(settings.PINECONE_INDEX_NAME)
+            self._initialized = True
+            return True
 
         except Exception as e:
             print(f"Error initializing Pinecone: {e}")
             self.pc = None
             self.index = None
+            self._initialized = True
+            return False
 
     async def add_vectors(
         self,
@@ -47,7 +62,8 @@ class VectorStoreService:
         metadatas: List[Dict[str, Any]]
     ) -> List[str]:
         """Add vectors to the vector store"""
-        if not self.index:
+        # Lazy initialization
+        if not await self._initialize_pinecone():
             # Return mock IDs if Pinecone is not available
             return [str(uuid.uuid4()) for _ in embeddings]
 
@@ -76,8 +92,7 @@ class VectorStoreService:
                 batch = vectors[i:i + batch_size]
                 await asyncio.get_event_loop().run_in_executor(
                     None,
-                    self.index.upsert,
-                    batch
+                    lambda b=batch: self.index.upsert(vectors=b)
                 )
 
             return vector_ids
@@ -94,7 +109,8 @@ class VectorStoreService:
         score_threshold: float = 0.7
     ) -> List[Dict[str, Any]]:
         """Search for similar vectors"""
-        if not self.index:
+        # Lazy initialization
+        if not await self._initialize_pinecone():
             # Return mock results if Pinecone is not available
             return [
                 {
@@ -149,8 +165,7 @@ class VectorStoreService:
                 batch = vector_ids[i:i + batch_size]
                 await asyncio.get_event_loop().run_in_executor(
                     None,
-                    self.index.delete,
-                    batch
+                    lambda b=batch: self.index.delete(ids=b)
                 )
 
         except Exception as e:
