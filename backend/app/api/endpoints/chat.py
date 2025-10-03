@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import re
@@ -5,13 +6,14 @@ import time
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Header, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, Header
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db as get_async_db
+from app.core.rate_limiter import rate_limiter
 from app.models.agent import Agent
 from app.models.conversation import Conversation
 from app.models.message import Message
@@ -29,10 +31,17 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 class ChatMessage(BaseModel):
-    message: str
-    conversation_id: Optional[str] = None
-    user_id: Optional[str] = None
-    session_context: Dict[str, Any] = {}
+    message: str = Field(..., min_length=1, max_length=4000, description="User message (max 4000 characters)")
+    conversation_id: Optional[str] = Field(None, max_length=100)
+    user_id: Optional[str] = Field(None, max_length=100)
+    session_context: Dict[str, Any] = Field(default_factory=dict)
+
+    @validator('message')
+    def validate_message(cls, v):
+        """Validate message is not just whitespace"""
+        if not v or not v.strip():
+            raise ValueError('Message cannot be empty or whitespace only')
+        return v.strip()
 
 class ChatResponse(BaseModel):
     response: str
@@ -154,6 +163,36 @@ def _sse_event(payload: Dict[str, Any]) -> str:
     return f"data: {json.dumps(payload)}\n\n"
 
 
+async def check_rate_limit_dependency(
+    agent_public_id: str,
+    chat_data: ChatMessage,
+) -> None:
+    """
+    Dependency to check rate limiting before processing request.
+    Rate limits per user_id or agent_public_id.
+    """
+    # Use user_id if provided, otherwise use agent_public_id
+    identifier = chat_data.user_id or f"agent:{agent_public_id}"
+
+    # Check rate limit (10 requests per minute for streaming)
+    is_limited, requests_made, remaining = await rate_limiter.is_rate_limited(
+        identifier=identifier,
+        max_requests=10,  # 10 requests per minute
+        window_seconds=60
+    )
+
+    if is_limited:
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error": "Rate limit exceeded",
+                "requests_made": requests_made,
+                "requests_remaining": remaining,
+                "message": "Too many requests. Please wait before sending another message."
+            }
+        )
+
+
 @router.post("/{agent_public_id}", response_model=ChatResponse)
 async def chat_with_agent(
     agent_public_id: str,
@@ -164,6 +203,9 @@ async def chat_with_agent(
     agent_session_header: Optional[str] = Header(None, alias="X-Agent-Session")
 ):
     """Chat with an agent using revolutionary domain expertise"""
+
+    # Check rate limit
+    await check_rate_limit_dependency(agent_public_id, chat_data)
 
     agent = await _authorize_agent_request(
         agent_public_id,
@@ -182,19 +224,12 @@ async def chat_with_agent(
         analysis = session_details.get("analysis")
         insights_payload = analysis or {}
 
-        # Mock organization object for domain expertise service
-        class MockOrganization:
-            def __init__(self, org_id):
-                self.id = org_id
-
-        organization = MockOrganization(agent.organization_id)
-
         # Use domain expertise service if enabled
         if agent.domain_expertise_enabled:
             domain_response = await domain_expertise_service.answer_with_domain_expertise(
                 message=chat_data.message,
                 agent=agent,
-                organization=organization,
+                organization=agent.organization,
                 conversation_context=chat_data.session_context
             )
 
@@ -330,6 +365,9 @@ async def chat_with_agent_stream(
     agent_api_key_header: Optional[str] = Header(None, alias="X-Agent-API-Key"),
     agent_session_header: Optional[str] = Header(None, alias="X-Agent-Session")
 ):
+    # Check rate limit
+    await check_rate_limit_dependency(agent_public_id, chat_data)
+
     agent = await _authorize_agent_request(
         agent_public_id,
         authorization,
@@ -354,15 +392,10 @@ async def chat_with_agent_stream(
             yield _sse_event({"type": "conversation", "conversation_id": conversation_id})
 
             if agent.domain_expertise_enabled:
-                class MockOrganization:
-                    def __init__(self, org_id):
-                        self.id = org_id
-
-                organization = MockOrganization(agent.organization_id)
                 domain_response = await domain_expertise_service.answer_with_domain_expertise(
                     message=chat_data.message,
                     agent=agent,
-                    organization=organization,
+                    organization=agent.organization,
                     conversation_context=chat_data.session_context
                 )
 
@@ -536,11 +569,28 @@ async def chat_with_agent_stream(
                     else:
                         yield _sse_event(chunk)
 
+        except asyncio.TimeoutError:
+            yield _sse_event({
+                "type": "error",
+                "message": "Request timeout: Streaming response exceeded 30 second limit"
+            })
         except Exception as exc:
             yield _sse_event({"type": "error", "message": str(exc)})
 
+    async def timeout_wrapper():
+        """Wrap event generator with timeout protection"""
+        try:
+            async with asyncio.timeout(30):  # 30 second timeout
+                async for event in event_generator():
+                    yield event
+        except asyncio.TimeoutError:
+            yield _sse_event({
+                "type": "error",
+                "message": "Request timeout: Streaming response exceeded 30 second limit"
+            })
+
     return StreamingResponse(
-        event_generator(),
+        timeout_wrapper(),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache"}
     )
@@ -555,57 +605,49 @@ async def get_conversation_history(
     agent_api_key_header: Optional[str] = Header(None, alias="X-Agent-API-Key"),
     agent_session_header: Optional[str] = Header(None, alias="X-Agent-Session")
 ):
-    await _authorize_agent_request(
+    """Get conversation history for a specific conversation"""
+    agent = await _authorize_agent_request(
         agent_public_id,
         authorization,
         agent_api_key_header,
         agent_session_header,
     )
 
-    # TODO: Get conversation history
+    # Query conversation to verify it belongs to this agent
+    result = await db.execute(
+        select(Conversation)
+        .where(
+            Conversation.session_id == conversation_id,
+            Conversation.agent_id == agent.id
+        )
+    )
+    conversation = result.scalar_one_or_none()
+
+    if not conversation:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Conversation '{conversation_id}' not found for this agent"
+        )
+
+    # Query all messages in chronological order
+    result = await db.execute(
+        select(Message)
+        .where(Message.conversation_id == conversation.id)
+        .order_by(Message.created_at.asc())
+    )
+    messages = result.scalars().all()
+
+    # Format response
     return [
-        {
-            "id": 1,
-            "role": "user",
-            "content": "Hello",
-            "timestamp": "2024-01-01T12:00:00Z"
-        },
-        {
-            "id": 2,
-            "role": "assistant",
-            "content": "Hi! How can I help you?",
-            "timestamp": "2024-01-01T12:00:01Z"
-        }
+        ConversationHistory(
+            id=msg.id,
+            role=msg.role,
+            content=msg.content,
+            timestamp=msg.created_at.isoformat() if msg.created_at else None,
+            metadata=msg.msg_metadata
+        )
+        for msg in messages
     ]
-
-@router.websocket("/{agent_id}/ws")
-async def websocket_chat(
-    websocket: WebSocket,
-    agent_id: int
-):
-    await websocket.accept()
-    try:
-        while True:
-            # Receive message from client
-            data = await websocket.receive_text()
-            message_data = json.loads(data)
-
-            # TODO: Process message and generate streaming response
-
-            # Send response back
-            response = {
-                "type": "message",
-                "content": f"Echo from agent {agent_id}: {message_data.get('message', '')}",
-                "conversation_id": "conv_ws_123"
-            }
-            await websocket.send_text(json.dumps(response))
-
-    except WebSocketDisconnect:
-        print(f"WebSocket disconnected for agent {agent_id}")
-    except Exception as e:
-        print(f"WebSocket error: {e}")
-        await websocket.close()
-
 
 # Helper functions
 async def _get_or_create_customer_profile(user_id: str, agent_id: int, db: AsyncSession) -> int:

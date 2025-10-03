@@ -180,6 +180,7 @@ class DatabaseService:
             result = await db.execute(
                 select(Agent)
                 .options(selectinload(Agent.documents))
+                .options(selectinload(Agent.organization))
                 .where(Agent.public_id == public_id)
             )
             agent = result.scalar_one_or_none()
