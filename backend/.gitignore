@@ -129,6 +129,8 @@ env.bak/
 venv.bak/
 venv-clean/
 .env.docker
+.env.dup
+.env.docker.dup
 
 # Spyder project settings
 .spyderproject
