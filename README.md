@@ -32,6 +32,23 @@ A platform for creating AI agents that companies can embed on their websites as 
    make migrate-up
    ```
 
+5. **Start Celery worker (for URL discovery/crawl):**
+   - Ensure Redis is running. If your Redis container is named `concierge-ai-redis-1`, set the backend to use it:
+     - Edit `backend/.env` and set `REDIS_URL=redis://concierge-ai-redis-1:6379`
+     - Optionally set `FIRECRAWL_API_KEY=...` to enable Firecrawl-based discovery
+   - Start the worker (local):
+     ```bash
+     make worker
+     ```
+   - Or via Docker using the backend image:
+     ```bash
+     make worker-docker
+     ```
+   - If you already have a Redis container (e.g., `concierge-ai-redis-1`) and want the worker container to use it:
+     ```bash
+     make worker-host-redis host=redis://concierge-ai-redis-1:6379
+     ```
+
 ### API Documentation
 - FastAPI Docs: http://localhost:8000/docs
 - ReDoc: http://localhost:8000/redoc
@@ -64,6 +81,14 @@ make migrate-up       # Run migrations
 make test            # Run tests
 make lint            # Lint code
 make clean           # Clean up Docker
+make worker          # Start Celery worker locally
+make worker-docker   # Start Celery worker via docker-compose
+make worker-host-redis host=redis://concierge-ai-redis-1:6379  # Worker using existing Redis container
+make demo-agent-flow # Run end-to-end agent creation demo script
+make demo-agent-simple # Run simple agent creation demo
+make demo-pdf-ingestion file=/path/to/file.pdf # Run PDF ingestion demo
+make demo-pdf-search # Run vector search demo
+make demo-security   # Run document security demo
 ```
 
 ### Key Features
