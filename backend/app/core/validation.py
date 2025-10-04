@@ -1,277 +1,337 @@
 """
-Input validation and sanitization utilities.
-Provides secure validation functions to prevent injection attacks and data corruption.
+Comprehensive input validation for production-ready API.
 """
 
 import re
-import html
-import unicodedata
-from typing import Optional, List, Union
-from urllib.parse import urlparse
-import email_validator
-from pydantic import validator
-import bleach
-import logging
+import uuid
+from typing import Any, Dict, List, Optional, Union
+from pydantic import BaseModel, Field, field_validator, model_validator
+from email_validator import validate_email, EmailNotValidError
 
-from .exceptions import SecurityError
+from .exceptions import ValidationException
 
-logger = logging.getLogger(__name__)
-
-# Regex patterns for common validations
-EMAIL_PATTERN = re.compile(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$')
-UUID_PATTERN = re.compile(r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')
-ALPHANUMERIC_PATTERN = re.compile(r'^[a-zA-Z0-9_-]+$')
-SAFE_NAME_PATTERN = re.compile(r'^[a-zA-Z0-9_\s\-\.]{1,100}$')
-
-# SQL injection detection patterns
-SQL_INJECTION_PATTERNS = [
-    re.compile(r"(\b(SELECT|INSERT|UPDATE|DELETE|DROP|CREATE|ALTER|EXEC|UNION|SCRIPT)\b)", re.IGNORECASE),
-    re.compile(r"(--|#|/\*|\*/)", re.IGNORECASE),
-    re.compile(r"('|('')|(\;)|(\\))", re.IGNORECASE),
-]
-
-# XSS detection patterns
-XSS_PATTERNS = [
-    re.compile(r"<script[^>]*>.*?</script>", re.IGNORECASE | re.DOTALL),
-    re.compile(r"javascript:", re.IGNORECASE),
-    re.compile(r"on\w+\s*=", re.IGNORECASE),
-    re.compile(r"<iframe[^>]*>.*?</iframe>", re.IGNORECASE | re.DOTALL),
-]
-
-# Allowed HTML tags for sanitization
-ALLOWED_HTML_TAGS = ['p', 'br', 'strong', 'em', 'u', 'ol', 'ul', 'li', 'a', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6']
-ALLOWED_HTML_ATTRIBUTES = {'a': ['href', 'title'], '*': ['class']}
-
-
-class InputValidator:
-    """Comprehensive input validation and sanitization"""
-
-    @staticmethod
-    def validate_email(email: str) -> str:
-        """Validate and sanitize email address"""
+class BaseValidator(BaseModel):
+    """Base validator with common validation methods"""
+    
+    @classmethod
+    def validate_email_format(cls, email: str) -> str:
+        """Validate email format"""
         if not email:
-            raise SecurityError("Email cannot be empty")
-
-        email = email.strip().lower()
-
-        if len(email) > 254:  # RFC 5321 limit
-            raise SecurityError("Email address too long")
-
-        if not EMAIL_PATTERN.match(email):
-            raise SecurityError("Invalid email format")
-
+            raise ValueError("Email is required")
+        
         try:
-            # Use email-validator for comprehensive validation
-            validated = email_validator.validate_email(email)
-            return validated.email
-        except email_validator.EmailNotValidError as e:
-            raise SecurityError(f"Invalid email: {str(e)}")
-
-    @staticmethod
-    def validate_uuid(uuid_str: str) -> str:
+            validated_email = validate_email(email)
+            return validated_email.email
+        except EmailNotValidError as e:
+            raise ValueError(f"Invalid email format: {str(e)}")
+    
+    @classmethod
+    def validate_uuid_format(cls, uuid_str: str, field_name: str = "UUID") -> str:
         """Validate UUID format"""
         if not uuid_str:
-            raise SecurityError("UUID cannot be empty")
-
-        uuid_str = uuid_str.strip()
-
-        if not UUID_PATTERN.match(uuid_str):
-            raise SecurityError("Invalid UUID format")
-
-        return uuid_str.lower()
-
-    @staticmethod
-    def validate_alphanumeric(value: str, field_name: str = "field") -> str:
-        """Validate alphanumeric input with underscores and hyphens"""
-        if not value:
-            raise SecurityError(f"{field_name} cannot be empty")
-
-        value = value.strip()
-
-        if len(value) > 100:
-            raise SecurityError(f"{field_name} too long (max 100 characters)")
-
-        if not ALPHANUMERIC_PATTERN.match(value):
-            raise SecurityError(f"{field_name} contains invalid characters")
-
-        return value
-
-    @staticmethod
-    def validate_safe_name(name: str, field_name: str = "name") -> str:
-        """Validate safe name input (letters, numbers, spaces, hyphens, underscores, dots)"""
+            raise ValueError(f"{field_name} is required")
+        
+        try:
+            uuid.UUID(uuid_str)
+            return uuid_str
+        except ValueError:
+            raise ValueError(f"Invalid {field_name} format")
+    
+    @classmethod
+    def validate_slug_format(cls, slug: str, field_name: str = "Slug") -> str:
+        """Validate slug format (alphanumeric, hyphens, underscores)"""
+        if not slug:
+            raise ValueError(f"{field_name} is required")
+        
+        if not re.match(r'^[a-zA-Z0-9_-]+$', slug):
+            raise ValueError(f"{field_name} can only contain letters, numbers, hyphens, and underscores")
+        
+        if len(slug) < 2 or len(slug) > 50:
+            raise ValueError(f"{field_name} must be between 2 and 50 characters")
+        
+        return slug.lower()
+    
+    @classmethod
+    def validate_name_format(cls, name: str, field_name: str = "Name") -> str:
+        """Validate name format"""
         if not name:
-            raise SecurityError(f"{field_name} cannot be empty")
+            raise ValueError(f"{field_name} is required")
 
         name = name.strip()
-
-        if len(name) > 100:
-            raise SecurityError(f"{field_name} too long (max 100 characters)")
-
-        if not SAFE_NAME_PATTERN.match(name):
-            raise SecurityError(f"{field_name} contains invalid characters")
+        if len(name) < 1 or len(name) > 255:
+            raise ValueError(f"{field_name} must be between 1 and 255 characters")
+        
+        # Check for potentially harmful characters
+        if re.search(r'[<>"\']', name):
+            raise ValueError(f"{field_name} contains invalid characters")
 
         return name
 
-    @staticmethod
-    def validate_url(url: str) -> str:
-        """Validate URL format and scheme"""
-        if not url:
-            raise SecurityError("URL cannot be empty")
+    @classmethod
+    def validate_password_strength(cls, password: str) -> str:
+        """Validate password strength"""
+        if not password:
+            raise ValueError("Password is required")
+        
+        if len(password) < 8:
+            raise ValueError("Password must be at least 8 characters long")
+        
+        if len(password) > 128:
+            raise ValueError("Password must be less than 128 characters")
+        
+        # Check for at least one uppercase, lowercase, digit, and special character
+        if not re.search(r'[A-Z]', password):
+            raise ValueError("Password must contain at least one uppercase letter")
+        
+        if not re.search(r'[a-z]', password):
+            raise ValueError("Password must contain at least one lowercase letter")
+        
+        if not re.search(r'\d', password):
+            raise ValueError("Password must contain at least one digit")
+        
+        if not re.search(r'[!@#$%^&*(),.?":{}|<>]', password):
+            raise ValueError("Password must contain at least one special character")
+        
+        return password
 
-        url = url.strip()
+class AgentValidator(BaseValidator):
+    """Validation for agent-related inputs"""
+    
+    name: str = Field(..., min_length=1, max_length=255)
+    description: Optional[str] = Field(None, max_length=2000)
+    system_prompt: Optional[str] = Field(None, max_length=10000)
+    
+    @field_validator('name')
+    @classmethod
+    def validate_name(cls, v):
+        return cls.validate_name_format(v, "Agent name")
+    
+    @field_validator('description')
+    @classmethod
+    def validate_description(cls, v):
+        if v is not None:
+            v = v.strip()
+            if len(v) > 2000:
+                raise ValueError("Description must be less than 2000 characters")
+        return v
+    
+    @field_validator('system_prompt')
+    @classmethod
+    def validate_system_prompt(cls, v):
+        if v is not None:
+            v = v.strip()
+            if len(v) > 10000:
+                raise ValueError("System prompt must be less than 10000 characters")
+        return v
 
-        if len(url) > 2048:  # Reasonable URL length limit
-            raise SecurityError("URL too long")
+class UserValidator(BaseValidator):
+    """Validation for user-related inputs"""
+    
+    email: str = Field(..., max_length=255)
+    password: str = Field(..., min_length=8, max_length=128)
+    name: str = Field(..., min_length=1, max_length=255)
+    
+    @field_validator('email')
+    @classmethod
+    def validate_email(cls, v):
+        return cls.validate_email_format(v)
+    
+    @field_validator('password')
+    @classmethod
+    def validate_password(cls, v):
+        return cls.validate_password_strength(v)
+    
+    @field_validator('name')
+    @classmethod
+    def validate_name(cls, v):
+        return cls.validate_name_format(v, "Name")
 
+class OrganizationValidator(BaseValidator):
+    """Validation for organization-related inputs"""
+    
+    name: str = Field(..., min_length=1, max_length=255)
+    slug: str = Field(..., min_length=2, max_length=50)
+    description: Optional[str] = Field(None, max_length=2000)
+    website: Optional[str] = Field(None, max_length=255)
+    
+    @field_validator('name')
+    @classmethod
+    def validate_name(cls, v):
+        return cls.validate_name_format(v, "Organization name")
+    
+    @field_validator('slug')
+    @classmethod
+    def validate_slug(cls, v):
+        return cls.validate_slug_format(v, "Organization slug")
+    
+    @field_validator('website')
+    @classmethod
+    def validate_website(cls, v):
+        if v is not None:
+            v = v.strip()
+            if v and not re.match(r'^https?://', v):
+                raise ValueError("Website must start with http:// or https://")
+        return v
+
+class DocumentValidator(BaseValidator):
+    """Validation for document-related inputs"""
+    
+    title: str = Field(..., min_length=1, max_length=255)
+    content: Optional[str] = Field(None, max_length=1000000)  # 1MB limit
+    file_type: str = Field(..., pattern=r'^(pdf|txt|docx|md|html)$')
+    
+    @field_validator('title')
+    @classmethod
+    def validate_title(cls, v):
+        return cls.validate_name_format(v, "Document title")
+    
+    @field_validator('content')
+    @classmethod
+    def validate_content(cls, v):
+        if v is not None and len(v) > 1000000:
+            raise ValueError("Document content must be less than 1MB")
+        return v
+
+class ChatValidator(BaseValidator):
+    """Validation for chat-related inputs"""
+    
+    message: str = Field(..., min_length=1, max_length=4000)
+    visitor_id: Optional[str] = Field(None, max_length=255)
+    session_context: Optional[Dict[str, Any]] = Field(None)
+    
+    @field_validator('message')
+    @classmethod
+    def validate_message(cls, v):
+        if not v or not v.strip():
+            raise ValueError("Message cannot be empty or whitespace only")
+        
+        v = v.strip()
+        if len(v) > 4000:
+            raise ValueError("Message must be less than 4000 characters")
+        
+        # Check for potentially harmful content
+        if re.search(r'<script|javascript:|data:|vbscript:', v, re.IGNORECASE):
+            raise ValueError("Message contains potentially harmful content")
+        
+        return v
+    
+    @field_validator('visitor_id')
+    @classmethod
+    def validate_visitor_id(cls, v):
+        if v is not None:
+            v = v.strip()
+            if not re.match(r'^[a-zA-Z0-9_-]+$', v):
+                raise ValueError("Visitor ID can only contain letters, numbers, hyphens, and underscores")
+        return v
+
+class PaginationValidator(BaseValidator):
+    """Validation for pagination parameters"""
+    
+    page: int = Field(1, ge=1, le=1000)
+    per_page: int = Field(10, ge=1, le=100)
+    
+    @field_validator('per_page')
+    @classmethod
+    def validate_per_page(cls, v):
+        if v > 100:
+            raise ValueError("per_page cannot exceed 100")
+        return v
+
+class SearchValidator(BaseValidator):
+    """Validation for search parameters"""
+    
+    query: str = Field(..., min_length=1, max_length=255)
+    filters: Optional[Dict[str, Any]] = Field(None)
+    
+    @field_validator('query')
+    @classmethod
+    def validate_query(cls, v):
+        if not v or not v.strip():
+            raise ValueError("Search query cannot be empty")
+        
+        v = v.strip()
+        if len(v) > 255:
+            raise ValueError("Search query must be less than 255 characters")
+        
+        return v
+
+class ConfigValidator(BaseValidator):
+    """Validation for configuration objects"""
+    
+    @classmethod
+    def validate_agent_config(cls, config: Dict[str, Any]) -> Dict[str, Any]:
+        """Validate agent configuration"""
+        if not isinstance(config, dict):
+            raise ValueError("Config must be a dictionary")
+        
+        # Validate model field
+        if 'model' in config:
+            allowed_models = ['gpt-4', 'gpt-3.5-turbo', 'gemini-2.0-flash-exp', 'claude-3-sonnet']
+            if config['model'] not in allowed_models:
+                raise ValueError(f"Model must be one of: {', '.join(allowed_models)}")
+        
+        # Validate temperature
+        if 'temperature' in config:
+            temp = config['temperature']
+            if not isinstance(temp, (int, float)) or temp < 0 or temp > 2:
+                raise ValueError("Temperature must be a number between 0 and 2")
+        
+        # Validate max_tokens
+        if 'max_tokens' in config:
+            tokens = config['max_tokens']
+            if not isinstance(tokens, int) or tokens < 1 or tokens > 4000:
+                raise ValueError("Max tokens must be an integer between 1 and 4000")
+        
+        return config
+    
+    @classmethod
+    def validate_widget_config(cls, config: Dict[str, Any]) -> Dict[str, Any]:
+        """Validate widget configuration"""
+        if not isinstance(config, dict):
+            raise ValueError("Widget config must be a dictionary")
+        
+        # Validate theme
+        if 'theme' in config:
+            allowed_themes = ['modern', 'classic', 'minimal', 'dark']
+            if config['theme'] not in allowed_themes:
+                raise ValueError(f"Theme must be one of: {', '.join(allowed_themes)}")
+        
+        # Validate position
+        if 'position' in config:
+            allowed_positions = ['bottom-right', 'bottom-left', 'top-right', 'top-left']
+            if config['position'] not in allowed_positions:
+                raise ValueError(f"Position must be one of: {', '.join(allowed_positions)}")
+        
+        # Validate size
+        if 'size' in config:
+            allowed_sizes = ['small', 'medium', 'large']
+            if config['size'] not in allowed_sizes:
+                raise ValueError(f"Size must be one of: {', '.join(allowed_sizes)}")
+        
+        return config
+
+def validate_input(data: Any, validator_class: type) -> Any:
+    """Validate input data using a validator class"""
+    try:
+        if isinstance(data, dict):
+            return validator_class(**data)
+        elif isinstance(data, validator_class):
+            return data
+        else:
+            raise ValueError(f"Invalid data type for {validator_class.__name__}")
+    except Exception as e:
+        raise ValidationException(f"Validation failed: {str(e)}")
+
+def validate_list_input(data: List[Any], validator_class: type) -> List[Any]:
+    """Validate a list of input data"""
+    if not isinstance(data, list):
+        raise ValidationException("Input must be a list")
+    
+    validated_items = []
+    for i, item in enumerate(data):
         try:
-            parsed = urlparse(url)
-            if parsed.scheme not in ['http', 'https']:
-                raise SecurityError("Invalid URL scheme (only http/https allowed)")
-
-            if not parsed.netloc:
-                raise SecurityError("Invalid URL format")
-
-            return url
+            validated_items.append(validate_input(item, validator_class))
         except Exception as e:
-            raise SecurityError(f"Invalid URL: {str(e)}")
-
-    @staticmethod
-    def detect_sql_injection(text: str) -> bool:
-        """Detect potential SQL injection attempts"""
-        if not text:
-            return False
-
-        for pattern in SQL_INJECTION_PATTERNS:
-            if pattern.search(text):
-                return True
-        return False
-
-    @staticmethod
-    def detect_xss(text: str) -> bool:
-        """Detect potential XSS attempts"""
-        if not text:
-            return False
-
-        for pattern in XSS_PATTERNS:
-            if pattern.search(text):
-                return True
-        return False
-
-    @staticmethod
-    def sanitize_text(text: str, max_length: int = 1000) -> str:
-        """Sanitize text input"""
-        if not text:
-            return ""
-
-        # Normalize unicode
-        text = unicodedata.normalize('NFKC', text)
-
-        # Strip and limit length
-        text = text.strip()[:max_length]
-
-        # Check for injection attempts
-        if InputValidator.detect_sql_injection(text):
-            logger.warning(f"SQL injection attempt detected: {text[:100]}...")
-            raise SecurityError("Potentially malicious input detected")
-
-        if InputValidator.detect_xss(text):
-            logger.warning(f"XSS attempt detected: {text[:100]}...")
-            raise SecurityError("Potentially malicious input detected")
-
-        # HTML escape for safety
-        text = html.escape(text)
-
-        return text
-
-    @staticmethod
-    def sanitize_html(html_content: str, max_length: int = 5000) -> str:
-        """Sanitize HTML content using bleach"""
-        if not html_content:
-            return ""
-
-        # Limit length
-        html_content = html_content[:max_length]
-
-        # Use bleach to sanitize HTML
-        cleaned = bleach.clean(
-            html_content,
-            tags=ALLOWED_HTML_TAGS,
-            attributes=ALLOWED_HTML_ATTRIBUTES,
-            strip=True
-        )
-
-        return cleaned
-
-    @staticmethod
-    def validate_json_field(value: str, field_name: str = "field") -> str:
-        """Validate JSON field values"""
-        if not value:
-            return ""
-
-        value = value.strip()
-
-        if len(value) > 10000:  # Limit JSON field size
-            raise SecurityError(f"{field_name} too long")
-
-        # Check for injection attempts
-        if InputValidator.detect_sql_injection(value):
-            raise SecurityError(f"Potentially malicious {field_name}")
-
-        return value
-
-    @staticmethod
-    def validate_integer(value: Union[int, str], min_val: int = None, max_val: int = None) -> int:
-        """Validate integer input with optional range"""
-        if isinstance(value, str):
-            if not value.strip().lstrip('-').isdigit():
-                raise SecurityError("Invalid integer format")
-            value = int(value.strip())
-        elif not isinstance(value, int):
-            raise SecurityError("Value must be an integer")
-
-        if min_val is not None and value < min_val:
-            raise SecurityError(f"Value must be at least {min_val}")
-
-        if max_val is not None and value > max_val:
-            raise SecurityError(f"Value must be at most {max_val}")
-
-        return value
-
-    @staticmethod
-    def validate_list_length(items: List, max_length: int = 100, field_name: str = "list") -> List:
-        """Validate list length"""
-        if not isinstance(items, list):
-            raise SecurityError(f"{field_name} must be a list")
-
-        if len(items) > max_length:
-            raise SecurityError(f"{field_name} too long (max {max_length} items)")
-
-        return items
-
-
-# Pydantic validator decorators for common validations
-def email_validator_func(cls, v):
-    """Pydantic validator for email fields"""
-    return InputValidator.validate_email(v) if v else v
-
-
-def uuid_validator_func(cls, v):
-    """Pydantic validator for UUID fields"""
-    return InputValidator.validate_uuid(v) if v else v
-
-
-def safe_text_validator_func(max_length: int = 1000):
-    """Pydantic validator factory for safe text fields"""
-    def validator_func(cls, v):
-        return InputValidator.sanitize_text(v, max_length) if v else v
-    return validator_func
-
-
-def safe_name_validator_func(cls, v):
-    """Pydantic validator for safe name fields"""
-    return InputValidator.validate_safe_name(v) if v else v
-
-
-def url_validator_func(cls, v):
-    """Pydantic validator for URL fields"""
-    return InputValidator.validate_url(v) if v else v
+            raise ValidationException(f"Validation failed for item {i}: {str(e)}")
+    
+    return validated_items

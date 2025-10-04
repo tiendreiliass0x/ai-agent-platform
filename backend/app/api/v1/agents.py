@@ -3,12 +3,18 @@ API endpoints for agent management.
 """
 
 from typing import List, Dict, Any, Optional, Union
-from fastapi import APIRouter, Depends, HTTPException, status, WebSocket, Header
+from fastapi import APIRouter, Depends, HTTPException, status, WebSocket, Header, Query, Path
 from sqlalchemy.ext.asyncio import AsyncSession
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 
 from ...core.database import get_db
 from ...core.auth import get_current_user
+from ...core.responses import StandardResponse, success_response, paginated_response
+from ...core.exceptions import (
+    NotFoundException, ForbiddenException, ValidationException, 
+    ConflictException, BusinessLogicException
+)
+from ...core.validation import AgentValidator, ConfigValidator, validate_input
 from ...services.database_service import db_service
 from ...services.agent_creation_service import agent_creation_service, AgentType, IndustryType
 from ...models.agent import Agent, AgentTier, DomainExpertiseType
@@ -65,7 +71,7 @@ class AgentSessionTokenResponse(BaseModel):
     expires_in: int
 
 
-def serialize_agent(agent: Agent) -> AgentResponse:
+def serialize_agent(agent: Agent, include_api_key: bool = False) -> AgentResponse:
     domain_sources = getattr(agent, "domain_knowledge_sources", []) or []
     if isinstance(domain_sources, list):
         normalized_sources: List[int] = []
@@ -78,6 +84,14 @@ def serialize_agent(agent: Agent) -> AgentResponse:
     else:
         domain_sources = []
 
+    # Mask API key by default for security
+    api_key = None
+    if include_api_key and agent.api_key:
+        api_key = agent.api_key
+    elif agent.api_key:
+        # Return masked version
+        api_key = f"{agent.api_key[:8]}...{agent.api_key[-4:]}" if len(agent.api_key) > 12 else "***"
+
     return AgentResponse(
         id=agent.id,
         public_id=agent.public_id,
@@ -87,7 +101,7 @@ def serialize_agent(agent: Agent) -> AgentResponse:
         is_active=agent.is_active,
         config=agent.config or {},
         widget_config=agent.widget_config or {},
-        api_key=agent.api_key,
+        api_key=api_key,
         created_at=agent.created_at.isoformat() if agent.created_at else "",
         updated_at=agent.updated_at.isoformat() if agent.updated_at else None,
         tier=agent.tier.value if getattr(agent, "tier", None) else None,
@@ -180,15 +194,48 @@ class AgentConfig(BaseModel):
 
 
 class AgentCreate(BaseModel):
-    name: str
-    description: str
-    system_prompt: str = ""
+    name: str = Field(..., min_length=1, max_length=255, description="Agent name")
+    description: str = Field(..., min_length=1, max_length=2000, description="Agent description")
+    system_prompt: str = Field("", max_length=10000, description="System prompt for the agent")
     config: Optional[AgentConfig] = None
     widget_config: Optional[WidgetConfig] = None
     agent_type: AgentType = AgentType.CUSTOM
     industry: IndustryType = IndustryType.GENERAL
     auto_optimize: bool = True
-    idempotency_key: Optional[str] = None  # Prevent duplicate creations
+    idempotency_key: Optional[str] = Field(None, max_length=255, description="Idempotency key to prevent duplicate creations")
+    
+    @field_validator('name')
+    @classmethod
+    def validate_name(cls, v):
+        return AgentValidator.validate_name_format(v, "Agent name")
+    
+    @field_validator('description')
+    @classmethod
+    def validate_description(cls, v):
+        if not v or not v.strip():
+            raise ValueError("Description is required")
+        return v.strip()
+    
+    @field_validator('system_prompt')
+    @classmethod
+    def validate_system_prompt(cls, v):
+        if v:
+            return v.strip()
+        return v
+    
+    @field_validator('config')
+    @classmethod
+    def validate_config(cls, v):
+        if v:
+            return ConfigValidator.validate_agent_config(v.dict())
+        return v
+    
+    @field_validator('widget_config')
+    @classmethod
+    def validate_widget_config(cls, v):
+        if v:
+            return ConfigValidator.validate_widget_config(v.dict())
+        return v
 
 
 class AgentUpdate(BaseModel):
@@ -259,11 +306,11 @@ async def get_industries():
     }
 
 
-@router.get("/", response_model=List[AgentResponse])
+@router.get("/", response_model=StandardResponse[List[AgentResponse]])
 async def get_agents(
-    organization_id: int,
-    limit: int = 50,
-    offset: int = 0,
+    organization_id: int = Query(..., description="Organization ID"),
+    page: int = Query(1, ge=1, le=1000, description="Page number"),
+    per_page: int = Query(50, ge=1, le=100, description="Items per page"),
     current_user = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
@@ -271,38 +318,50 @@ async def get_agents(
 
     Args:
         organization_id: Organization ID
-        limit: Maximum number of agents to return (default 50, max 100)
-        offset: Number of agents to skip for pagination
+        page: Page number (default 1)
+        per_page: Items per page (default 50, max 100)
     """
     try:
         # Verify user has access to organization using new auth system
         from ...core.auth import verify_organization_access
         if not verify_organization_access(organization_id, current_user):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Access denied - user does not have access to this organization"
-            )
+            raise ForbiddenException("Access denied - user does not have access to this organization")
 
-        # Enforce max limit
-        limit = min(limit, 100)
+        # Calculate offset from page and per_page
+        offset = (page - 1) * per_page
 
         # Use provided db session for better performance
         agents = await db_service.get_organization_agents(
-            organization_id, db=db, limit=limit, offset=offset
+            organization_id, db=db, limit=per_page, offset=offset
         )
-        return [serialize_agent(agent) for agent in agents]
-    except HTTPException:
+        
+        # Get total count for pagination
+        total_count = await db_service.count_organization_agents(organization_id, db=db)
+        
+        serialized_agents = [serialize_agent(agent) for agent in agents]
+        
+        return success_response(
+            data=serialized_agents,
+            meta={
+                "pagination": {
+                    "page": page,
+                    "per_page": per_page,
+                    "total": total_count,
+                    "pages": (total_count + per_page - 1) // per_page,
+                    "has_next": page * per_page < total_count,
+                    "has_prev": page > 1
+                }
+            }
+        )
+    except (NotFoundException, ForbiddenException, ValidationException):
         raise
     except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error fetching agents: {str(e)}"
-        )
+        raise BusinessLogicException(f"Error fetching agents: {str(e)}", "get_agents")
 
 
-@router.get("/{agent_id}", response_model=AgentResponse)
+@router.get("/{agent_id}", response_model=StandardResponse[AgentResponse])
 async def get_agent(
-    agent_id: int,
+    agent_id: int = Path(..., ge=1, description="Agent ID"),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
@@ -311,40 +370,31 @@ async def get_agent(
         # Use provided db session
         agent = await db_service.get_agent_by_id(agent_id, db=db)
         if not agent:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Agent not found"
-            )
+            raise NotFoundException("Agent not found", "agent", agent_id)
 
         # Verify user owns this agent
         if agent.user_id != current_user.id:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Access denied"
-            )
+            raise ForbiddenException("Access denied - you can only access your own agents")
 
-        return serialize_agent(agent)
-    except HTTPException:
+        return success_response(data=serialize_agent(agent))
+    except (NotFoundException, ForbiddenException):
         raise
     except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error fetching agent: {str(e)}"
-        )
+        raise BusinessLogicException(f"Error fetching agent: {str(e)}", "get_agent")
 
 
-@router.post("/", response_model=EnhancedAgentResponse)
+@router.post("/", response_model=StandardResponse[EnhancedAgentResponse])
 async def create_agent(
-    organization_id: int,
     agent_data: AgentCreate,
+    organization_id: int = Query(..., ge=1, description="Organization ID"),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
-    """Create a new agent with intelligent optimization and templates
-
-    Supports idempotency via idempotency_key to prevent duplicate agent creations.
-    """
+    """Create a new agent with intelligent optimization and templates"""
     try:
+        # Validate input data
+        validate_input(agent_data.dict(), AgentCreate)
+        
         # Check idempotency key
         if agent_data.idempotency_key:
             existing_agent = await db_service.get_agent_by_idempotency_key(
@@ -355,7 +405,7 @@ async def create_agent(
             )
             if existing_agent:
                 # Return existing agent (idempotent response)
-                return EnhancedAgentResponse(
+                enhanced_response = EnhancedAgentResponse(
                     agent=serialize_agent(existing_agent),
                     embed_code=agent_creation_service._generate_embed_code(existing_agent),
                     setup_guide={},
@@ -363,29 +413,26 @@ async def create_agent(
                     template_used=None,
                     recommendations=[]
                 )
+                return success_response(
+                    data=enhanced_response,
+                    message="Agent already exists (idempotent response)"
+                )
 
         # Verify user can manage agents in organization
         user_org = await db_service.get_user_organization(current_user.id, organization_id)
         if not user_org or not user_org.can_manage_agents:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Access denied"
-            )
+            raise ForbiddenException("Access denied - insufficient permissions to create agents")
 
         # Check organization limits
         organization = await db_service.get_organization_by_id(organization_id)
         if not organization:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Organization not found"
-            )
+            raise NotFoundException("Organization not found", "organization", organization_id)
 
         # Convert Pydantic models to dicts for service layer
         config_dict = agent_data.config.dict() if agent_data.config else {}
         widget_config_dict = agent_data.widget_config.dict() if agent_data.widget_config else {}
 
         # Use advanced agent creation service with atomic limit checking
-        # The limit check is now done inside the transaction to prevent race conditions
         creation_result = await agent_creation_service.create_intelligent_agent(
             user_id=current_user.id,
             organization_id=organization_id,
@@ -405,8 +452,7 @@ async def create_agent(
         )
 
         agent = creation_result["agent"]
-
-        return EnhancedAgentResponse(
+        enhanced_response = EnhancedAgentResponse(
             agent=serialize_agent(agent),
             embed_code=creation_result["embed_code"],
             setup_guide=creation_result["setup_guide"],
@@ -414,11 +460,15 @@ async def create_agent(
             template_used=creation_result["template_used"],
             recommendations=creation_result["recommendations"]
         )
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error creating agent: {str(e)}"
+
+        return success_response(
+            data=enhanced_response,
+            message="Agent created successfully"
         )
+    except (NotFoundException, ForbiddenException, ValidationException, ConflictException):
+        raise
+    except Exception as e:
+        raise BusinessLogicException(f"Error creating agent: {str(e)}", "create_agent")
 
 
 @router.put("/{agent_id}", response_model=AgentResponse)
@@ -475,7 +525,7 @@ async def update_agent(
 
 @router.delete("/{agent_id}")
 async def delete_agent(
-    agent_id: int,
+    agent_id: int = Path(..., ge=1, description="Agent ID"),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
@@ -495,39 +545,26 @@ async def delete_agent(
         # Verify user owns this agent
         existing_agent = await db_service.get_agent_by_id(agent_id)
         if not existing_agent:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Agent not found"
-            )
+            raise NotFoundException("Agent not found", "agent", agent_id)
 
         if existing_agent.user_id != current_user.id:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Access denied - you can only delete your own agents"
-            )
+            raise ForbiddenException("Access denied - you can only delete your own agents")
 
         # Perform the deletion
         success = await db_service.delete_agent(agent_id)
 
         if not success:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to delete agent"
-            )
+            raise BusinessLogicException("Failed to delete agent", "delete_agent")
 
-        return {
-            "success": True,
-            "message": f"Agent {existing_agent.name} has been permanently deleted",
-            "agent_id": agent_id
-        }
+        return success_response(
+            data={"agent_id": agent_id, "deleted_name": existing_agent.name},
+            message=f"Agent '{existing_agent.name}' has been permanently deleted"
+        )
 
-    except HTTPException:
+    except (NotFoundException, ForbiddenException, BusinessLogicException):
         raise
     except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error deleting agent: {str(e)}"
-        )
+        raise BusinessLogicException(f"Error deleting agent: {str(e)}", "delete_agent")
 
 
 @router.get("/{agent_id}/stats")
@@ -686,6 +723,82 @@ async def update_agent_domain_expertise(
     )
 
     return serialize_agent(updated_agent)
+
+
+@router.get("/{agent_id}/api-key")
+async def get_agent_api_key(
+    agent_id: int = Path(..., ge=1, description="Agent ID"),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Get agent API key (masked for security)"""
+    try:
+        # Verify user owns this agent
+        agent = await db_service.get_agent_by_id(agent_id, db=db)
+        if not agent:
+            raise NotFoundException("Agent not found", "agent", agent_id)
+
+        if agent.user_id != current_user.id:
+            raise ForbiddenException("Access denied - you can only access your own agents")
+
+        # Return masked API key
+        api_key = agent.api_key
+        if api_key:
+            masked_key = f"{api_key[:8]}...{api_key[-4:]}" if len(api_key) > 12 else "***"
+        else:
+            masked_key = None
+
+        return success_response(
+            data={
+                "agent_id": agent_id,
+                "api_key_masked": masked_key,
+                "has_api_key": bool(api_key)
+            },
+            message="API key retrieved successfully"
+        )
+    except (NotFoundException, ForbiddenException):
+        raise
+    except Exception as e:
+        raise BusinessLogicException(f"Error retrieving API key: {str(e)}", "get_api_key")
+
+
+@router.post("/{agent_id}/regenerate-api-key")
+async def regenerate_agent_api_key(
+    agent_id: int = Path(..., ge=1, description="Agent ID"),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Regenerate agent API key"""
+    try:
+        # Verify user owns this agent
+        agent = await db_service.get_agent_by_id(agent_id, db=db)
+        if not agent:
+            raise NotFoundException("Agent not found", "agent", agent_id)
+
+        if agent.user_id != current_user.id:
+            raise ForbiddenException("Access denied - you can only access your own agents")
+
+        # Generate new API key
+        import secrets
+        new_api_key = f"agent_{secrets.token_urlsafe(32)}"
+        
+        # Update agent with new API key
+        updated_agent = await db_service.update_agent(agent_id, api_key=new_api_key)
+        if not updated_agent:
+            raise BusinessLogicException("Failed to update API key", "regenerate_api_key")
+
+        return success_response(
+            data={
+                "agent_id": agent_id,
+                "api_key": new_api_key,
+                "message": "API key regenerated successfully"
+            },
+            message="API key regenerated successfully"
+        )
+    except (NotFoundException, ForbiddenException, BusinessLogicException):
+        raise
+    except Exception as e:
+        raise BusinessLogicException(f"Error regenerating API key: {str(e)}", "regenerate_api_key")
 
 
 @router.get("/{agent_id}/conversations")

@@ -56,7 +56,8 @@ class Agent(Base):
     # API key for embedding
     api_key = Column(String, unique=True, index=True)
 
-    idempotency_key = Column(String, index=True, nullable=True)
+    # Idempotency key for preventing duplicate agent creations
+    idempotency_key = Column(String(255), index=True, nullable=True)
 
     # Usage tracking
     total_conversations = Column(Integer, default=0)

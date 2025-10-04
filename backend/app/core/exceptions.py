@@ -1,218 +1,239 @@
 """
-Secure global exception handlers for the FastAPI application.
-Prevents information leakage while providing proper error responses.
+Enhanced exception handling for production-ready API.
 """
 
-from fastapi import Request, HTTPException, status
-from fastapi.responses import JSONResponse
-from fastapi.exceptions import RequestValidationError
-from starlette.exceptions import HTTPException as StarletteHTTPException
 import logging
-import traceback
-import uuid
-from typing import Dict, Any
-from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
+from fastapi import Request, HTTPException
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from pydantic import ValidationError
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from .config import settings
+from .responses import ErrorResponse, ResponseStatus
 
-# Configure logging
 logger = logging.getLogger(__name__)
 
-
-class SecurityError(Exception):
-    """Raised when security violations are detected"""
-    pass
-
-
-class BusinessLogicError(Exception):
-    """Raised for business logic violations"""
-    def __init__(self, message: str, status_code: int = 400):
+class BaseAPIException(Exception):
+    """Base exception for API errors"""
+    def __init__(self, message: str, code: str = None, details: Dict[str, Any] = None):
         self.message = message
-        self.status_code = status_code
-        super().__init__(message)
+        self.code = code
+        self.details = details or {}
+        super().__init__(self.message)
 
+class ValidationException(BaseAPIException):
+    """Validation error exception"""
+    def __init__(self, message: str, field_errors: List[str] = None):
+        self.field_errors = field_errors or []
+        super().__init__(message, code="VALIDATION_ERROR", details={"field_errors": self.field_errors})
 
-def create_error_response(
-    status_code: int,
-    message: str,
-    details: Dict[str, Any] = None,
-    error_id: str = None
-) -> JSONResponse:
-    """Create standardized error response"""
+class NotFoundException(BaseAPIException):
+    """Resource not found exception"""
+    def __init__(self, message: str, resource_type: str = None, resource_id: Any = None):
+        details = {}
+        if resource_type:
+            details["resource_type"] = resource_type
+        if resource_id is not None:
+            details["resource_id"] = resource_id
+        super().__init__(message, code="NOT_FOUND", details=details)
 
-    if not error_id:
-        error_id = str(uuid.uuid4())
+class UnauthorizedException(BaseAPIException):
+    """Unauthorized access exception"""
+    def __init__(self, message: str = "Unauthorized access"):
+        super().__init__(message, code="UNAUTHORIZED")
 
-    response_data = {
-        "error": True,
-        "message": message,
-        "error_id": error_id,
-        "timestamp": datetime.now(timezone.utc).isoformat()
-    }
+class ForbiddenException(BaseAPIException):
+    """Forbidden access exception"""
+    def __init__(self, message: str = "Access forbidden"):
+        super().__init__(message, code="FORBIDDEN")
 
-    # Only include details in development mode
-    if settings.ENVIRONMENT == "development" and details:
-        response_data["details"] = details
+class ConflictException(BaseAPIException):
+    """Resource conflict exception"""
+    def __init__(self, message: str, conflicting_resource: str = None):
+        details = {}
+        if conflicting_resource:
+            details["conflicting_resource"] = conflicting_resource
+        super().__init__(message, code="CONFLICT", details=details)
 
-    return JSONResponse(
-        status_code=status_code,
-        content=response_data
-    )
+class RateLimitException(BaseAPIException):
+    """Rate limit exceeded exception"""
+    def __init__(self, message: str = "Rate limit exceeded", retry_after: int = None):
+        details = {}
+        if retry_after:
+            details["retry_after"] = retry_after
+        super().__init__(message, code="RATE_LIMIT_EXCEEDED", details=details)
 
+class BusinessLogicException(BaseAPIException):
+    """Business logic error exception"""
+    def __init__(self, message: str, operation: str = None):
+        details = {}
+        if operation:
+            details["operation"] = operation
+        super().__init__(message, code="BUSINESS_LOGIC_ERROR", details=details)
 
-async def http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
-    """Handle HTTPException with security considerations"""
-
-    error_id = str(uuid.uuid4())
-
-    # Log the error
-    logger.warning(
-        f"HTTP Exception: {exc.status_code} - {exc.detail} "
-        f"(Error ID: {error_id}, Path: {request.url.path})"
-    )
-
-    # Don't expose internal details in production
-    if settings.ENVIRONMENT == "production" and exc.status_code >= 500:
-        message = "Internal server error"
-    else:
-        message = exc.detail
-
-    return create_error_response(
-        status_code=exc.status_code,
-        message=message,
-        error_id=error_id
-    )
-
-
-async def starlette_http_exception_handler(
-    request: Request,
-    exc: StarletteHTTPException
-) -> JSONResponse:
-    """Handle Starlette HTTPException"""
-
-    error_id = str(uuid.uuid4())
-
-    logger.warning(
-        f"Starlette HTTP Exception: {exc.status_code} - {exc.detail} "
-        f"(Error ID: {error_id}, Path: {request.url.path})"
-    )
-
-    return create_error_response(
-        status_code=exc.status_code,
-        message=exc.detail,
-        error_id=error_id
-    )
-
-
-async def validation_exception_handler(
-    request: Request,
-    exc: RequestValidationError
-) -> JSONResponse:
-    """Handle request validation errors"""
-
-    error_id = str(uuid.uuid4())
-
-    # Log validation error details
-    logger.info(
-        f"Validation Error: {exc.errors()} "
-        f"(Error ID: {error_id}, Path: {request.url.path})"
-    )
-
-    # Sanitize validation errors to prevent information leakage
-    sanitized_errors = []
-    for error in exc.errors():
-        sanitized_error = {
-            "field": ".".join(str(loc) for loc in error["loc"]),
-            "message": error["msg"],
-            "type": error["type"]
-        }
-        sanitized_errors.append(sanitized_error)
-
-    return create_error_response(
-        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-        message="Validation error",
-        details={"validation_errors": sanitized_errors} if settings.ENVIRONMENT == "development" else None,
-        error_id=error_id
-    )
-
-
-async def security_exception_handler(request: Request, exc: SecurityError) -> JSONResponse:
-    """Handle security violations"""
-
-    error_id = str(uuid.uuid4())
-
-    # Log security violations with high priority
-    logger.error(
-        f"SECURITY VIOLATION: {str(exc)} "
-        f"(Error ID: {error_id}, Path: {request.url.path}, "
-        f"Client: {request.client.host if request.client else 'unknown'})"
-    )
-
-    # Never expose security error details
-    return create_error_response(
-        status_code=status.HTTP_403_FORBIDDEN,
-        message="Access denied",
-        error_id=error_id
-    )
-
-
-async def business_logic_exception_handler(
-    request: Request,
-    exc: BusinessLogicError
-) -> JSONResponse:
-    """Handle business logic errors"""
-
-    error_id = str(uuid.uuid4())
-
-    logger.info(
-        f"Business Logic Error: {exc.message} "
-        f"(Error ID: {error_id}, Path: {request.url.path})"
-    )
-
-    return create_error_response(
-        status_code=exc.status_code,
-        message=exc.message,
-        error_id=error_id
-    )
-
-
-async def general_exception_handler(request: Request, exc: Exception) -> JSONResponse:
-    """Handle unexpected exceptions"""
-
-    error_id = str(uuid.uuid4())
-
-    # Log the full exception with stack trace
-    logger.error(
-        f"Unhandled Exception: {type(exc).__name__}: {str(exc)} "
-        f"(Error ID: {error_id}, Path: {request.url.path})",
-        exc_info=True
-    )
-
-    # In production, never expose internal error details
-    if settings.ENVIRONMENT == "production":
-        message = "Internal server error"
-        details = None
-    else:
-        message = f"{type(exc).__name__}: {str(exc)}"
-        details = {
-            "exception_type": type(exc).__name__,
-            "traceback": traceback.format_exc().split('\n')
-        }
-
-    return create_error_response(
-        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        message=message,
-        details=details,
-        error_id=error_id
-    )
-
+class ExternalServiceException(BaseAPIException):
+    """External service error exception"""
+    def __init__(self, message: str, service: str = None):
+        details = {}
+        if service:
+            details["service"] = service
+        super().__init__(message, code="EXTERNAL_SERVICE_ERROR", details=details)
 
 def setup_exception_handlers(app):
-    """Setup all exception handlers for the FastAPI app"""
+    """Setup exception handlers for the FastAPI app"""
+    
+    @app.exception_handler(BaseAPIException)
+    async def base_api_exception_handler(request: Request, exc: BaseAPIException):
+        """Handle custom API exceptions"""
+        logger.warning(f"API Exception: {exc.message} (Code: {exc.code})", extra={
+            "exception_type": exc.__class__.__name__,
+            "code": exc.code,
+            "details": exc.details,
+            "path": request.url.path,
+            "method": request.method
+        })
+        
+        # Map custom exceptions to HTTP status codes
+        status_code = 500  # Default
+        if isinstance(exc, ValidationException):
+            status_code = 400
+        elif isinstance(exc, UnauthorizedException):
+            status_code = 401
+        elif isinstance(exc, ForbiddenException):
+            status_code = 403
+        elif isinstance(exc, NotFoundException):
+            status_code = 404
+        elif isinstance(exc, ConflictException):
+            status_code = 409
+        elif isinstance(exc, RateLimitException):
+            status_code = 429
+        elif isinstance(exc, BusinessLogicException):
+            status_code = 422
+        elif isinstance(exc, ExternalServiceException):
+            status_code = 502
+        
+        error_response = ErrorResponse(
+            status=ResponseStatus.ERROR,
+            message=exc.message,
+            code=exc.code,
+            details=exc.details
+        )
+        
+        return JSONResponse(
+            status_code=status_code,
+            content=error_response.dict()
+        )
 
-    app.add_exception_handler(HTTPException, http_exception_handler)
-    app.add_exception_handler(StarletteHTTPException, starlette_http_exception_handler)
-    app.add_exception_handler(RequestValidationError, validation_exception_handler)
-    app.add_exception_handler(SecurityError, security_exception_handler)
-    app.add_exception_handler(BusinessLogicError, business_logic_exception_handler)
-    app.add_exception_handler(Exception, general_exception_handler)
+    @app.exception_handler(RequestValidationError)
+    async def validation_exception_handler(request: Request, exc: RequestValidationError):
+        """Handle Pydantic validation errors"""
+        logger.warning(f"Validation Error: {exc.errors()}", extra={
+            "path": request.url.path,
+            "method": request.method,
+            "errors": exc.errors()
+        })
+        
+        # Extract field errors
+        field_errors = []
+        for error in exc.errors():
+            field_path = " -> ".join(str(loc) for loc in error["loc"])
+            field_errors.append(f"{field_path}: {error['msg']}")
+        
+        error_response = ErrorResponse(
+            status=ResponseStatus.ERROR,
+            message="Validation failed",
+            errors=field_errors,
+            code="VALIDATION_ERROR",
+            details={"validation_errors": exc.errors()}
+        )
+        
+        return JSONResponse(
+            status_code=422,
+            content=error_response.dict()
+        )
+
+    @app.exception_handler(HTTPException)
+    async def http_exception_handler(request: Request, exc: HTTPException):
+        """Handle FastAPI HTTP exceptions"""
+        logger.warning(f"HTTP Exception: {exc.detail}", extra={
+            "status_code": exc.status_code,
+            "path": request.url.path,
+            "method": request.method
+        })
+        
+        error_response = ErrorResponse(
+            status=ResponseStatus.ERROR,
+            message=str(exc.detail),
+            code=f"HTTP_{exc.status_code}"
+        )
+        
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=error_response.dict()
+        )
+
+    @app.exception_handler(StarletteHTTPException)
+    async def starlette_exception_handler(request: Request, exc: StarletteHTTPException):
+        """Handle Starlette HTTP exceptions"""
+        logger.warning(f"Starlette Exception: {exc.detail}", extra={
+            "status_code": exc.status_code,
+            "path": request.url.path,
+            "method": request.method
+        })
+        
+        error_response = ErrorResponse(
+            status=ResponseStatus.ERROR,
+            message=str(exc.detail),
+            code=f"HTTP_{exc.status_code}"
+        )
+        
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=error_response.dict()
+        )
+
+    @app.exception_handler(Exception)
+    async def general_exception_handler(request: Request, exc: Exception):
+        """Handle unexpected exceptions"""
+        logger.error(f"Unexpected Exception: {str(exc)}", extra={
+            "exception_type": exc.__class__.__name__,
+            "path": request.url.path,
+            "method": request.method
+        }, exc_info=True)
+        
+        error_response = ErrorResponse(
+            status=ResponseStatus.ERROR,
+            message="An unexpected error occurred",
+            code="INTERNAL_SERVER_ERROR"
+        )
+        
+        return JSONResponse(
+            status_code=500,
+            content=error_response.dict()
+        )
+
+# Convenience functions for raising exceptions
+def raise_not_found(message: str, resource_type: str = None, resource_id: Any = None):
+    """Raise a not found exception"""
+    raise NotFoundException(message, resource_type, resource_id)
+
+def raise_unauthorized(message: str = "Unauthorized access"):
+    """Raise an unauthorized exception"""
+    raise UnauthorizedException(message)
+
+def raise_forbidden(message: str = "Access forbidden"):
+    """Raise a forbidden exception"""
+    raise ForbiddenException(message)
+
+def raise_validation_error(message: str, field_errors: List[str] = None):
+    """Raise a validation exception"""
+    raise ValidationException(message, field_errors)
+
+def raise_conflict(message: str, conflicting_resource: str = None):
+    """Raise a conflict exception"""
+    raise ConflictException(message, conflicting_resource)
+
+def raise_business_logic_error(message: str, operation: str = None):
+    """Raise a business logic exception"""
+    raise BusinessLogicException(message, operation)
