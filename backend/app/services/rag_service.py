@@ -8,7 +8,7 @@ from app.services.document_processor import DocumentProcessor
 from app.services.embedding_service import EmbeddingService
 from app.services.gemini_service import gemini_service
 from app.services.personality_service import personality_service
-from app.services.context_compression import compress_context_snippet
+from app.services.context.context_compression import compress_context_snippet
 from app.services.reranker_service import reranker_service
 
 class RAGService:

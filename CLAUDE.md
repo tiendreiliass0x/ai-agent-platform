@@ -37,7 +37,7 @@ make migrate-down
 ### Testing
 ```bash
 make test               # Run all tests
-cd backend && source venv-clean/bin/activate && pytest    # Run backend tests
+cd backend && source venv-clean/bin/activate && uv run pytest    # Run backend tests
 pytest tests/test_specific.py  # Run specific test file
 pytest -m unit          # Run unit tests only
 pytest -m integration   # Run integration tests only

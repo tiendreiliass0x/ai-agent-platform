@@ -13,7 +13,7 @@ from unittest.mock import Mock, AsyncMock, patch
 from typing import Dict, Any, List
 
 from app.services.database_service import DatabaseService, db_service
-from app.services.context_service import ContextEngine, ContextChunk
+from app.services.context.context_service import ContextEngine, ContextChunk
 from app.services.agent_creation_service import AgentCreationService, AgentType, IndustryType
 from app.models.user import User
 from app.models.organization import Organization

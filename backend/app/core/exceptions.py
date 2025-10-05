@@ -133,24 +133,38 @@ def setup_exception_handlers(app):
             "method": request.method,
             "errors": exc.errors()
         })
-        
-        # Extract field errors
+
+        # Extract field errors and make them JSON serializable
         field_errors = []
+        validation_errors = []
         for error in exc.errors():
             field_path = " -> ".join(str(loc) for loc in error["loc"])
             field_errors.append(f"{field_path}: {error['msg']}")
-        
+
+            # Create JSON-serializable version of error
+            serializable_error = {
+                "loc": error["loc"],
+                "msg": error["msg"],
+                "type": error["type"]
+            }
+            # Convert ctx values to strings if present
+            if "ctx" in error:
+                serializable_error["ctx"] = {
+                    k: str(v) for k, v in error["ctx"].items()
+                }
+            validation_errors.append(serializable_error)
+
         error_response = ErrorResponse(
             status=ResponseStatus.ERROR,
             message="Validation failed",
             errors=field_errors,
             code="VALIDATION_ERROR",
-            details={"validation_errors": exc.errors()}
+            details={"validation_errors": validation_errors}
         )
-        
+
         return JSONResponse(
             status_code=422,
-            content=error_response.dict()
+            content=error_response.model_dump()
         )
 
     @app.exception_handler(HTTPException)
@@ -161,16 +175,16 @@ def setup_exception_handlers(app):
             "path": request.url.path,
             "method": request.method
         })
-        
+
         error_response = ErrorResponse(
             status=ResponseStatus.ERROR,
             message=str(exc.detail),
             code=f"HTTP_{exc.status_code}"
         )
-        
+
         return JSONResponse(
             status_code=exc.status_code,
-            content=error_response.dict()
+            content=error_response.model_dump()
         )
 
     @app.exception_handler(StarletteHTTPException)
@@ -181,16 +195,16 @@ def setup_exception_handlers(app):
             "path": request.url.path,
             "method": request.method
         })
-        
+
         error_response = ErrorResponse(
             status=ResponseStatus.ERROR,
             message=str(exc.detail),
             code=f"HTTP_{exc.status_code}"
         )
-        
+
         return JSONResponse(
             status_code=exc.status_code,
-            content=error_response.dict()
+            content=error_response.model_dump()
         )
 
     @app.exception_handler(Exception)
@@ -201,16 +215,16 @@ def setup_exception_handlers(app):
             "path": request.url.path,
             "method": request.method
         }, exc_info=True)
-        
+
         error_response = ErrorResponse(
             status=ResponseStatus.ERROR,
             message="An unexpected error occurred",
             code="INTERNAL_SERVER_ERROR"
         )
-        
+
         return JSONResponse(
             status_code=500,
-            content=error_response.dict()
+            content=error_response.model_dump()
         )
 
 # Convenience functions for raising exceptions

@@ -12,7 +12,7 @@ import uuid
 
 # Simulate our services (since we don't have full database integration yet)
 from app.services.concierge_intelligence_service import concierge_intelligence
-from app.services.contextual_case_builder import contextual_case_builder
+from app.services.context.contextual_case_builder import contextual_case_builder
 from app.services.enhanced_rag_service import world_class_rag
 from app.services.profile_enrichment_pipeline import profile_enrichment_pipeline, EnrichmentTrigger, EnrichmentPriority
 

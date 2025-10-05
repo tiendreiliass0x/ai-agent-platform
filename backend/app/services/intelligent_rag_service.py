@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional, TYPE_CHECKING
 from app.core.config import settings
 from app.services.memory_service import memory_service
 from app.services.gemini_service import gemini_service
-from app.services.context_service import context_engine
+from app.services.context.context_service import context_engine
 from app.services.user_intelligence_service import user_intelligence_service
 from app.services.database_service import db_service
 from app.services.web_search_service import web_search_service

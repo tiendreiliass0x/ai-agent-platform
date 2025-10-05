@@ -155,7 +155,7 @@ class EmbeddingCache:
         self.cache = {}
         self.max_size = max_size
 
-    def get(self, text: str) -> List[float] | None:
+    def get(self, text: str) -> Optional[List[float]]:
         """Get cached embedding for text"""
         text_hash = hash(text)
         return self.cache.get(text_hash)

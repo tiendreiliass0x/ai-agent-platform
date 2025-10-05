@@ -71,21 +71,25 @@ async def test_agent_public_id_unique_constraint(db_session: AsyncSession, test_
 @pytest.mark.database
 @pytest.mark.asyncio
 async def test_agent_public_id_not_null(db_session: AsyncSession, test_organization, test_user):
-    """Test that public_id cannot be null."""
+    """Test that public_id auto-generates when not provided (cannot be null)."""
+    # Create agent without providing public_id
     agent = Agent(
         name="Test Agent",
         description="Test agent",
         user_id=test_user.id,
         organization_id=test_organization.id,
-        is_active=True,
-        public_id=None  # This should fail
+        is_active=True
+        # public_id not provided - should auto-generate
     )
 
     db_session.add(agent)
+    await db_session.commit()
+    await db_session.refresh(agent)
 
-    # Should raise integrity error due to NOT NULL constraint
-    with pytest.raises(IntegrityError):
-        await db_session.commit()
+    # Should have auto-generated UUID
+    assert agent.public_id is not None
+    assert len(agent.public_id) > 0
+    assert '-' in agent.public_id  # UUID format
 
 
 @pytest.mark.database
@@ -173,12 +177,7 @@ async def test_user_organization_relationship(db_session: AsyncSession):
         user_id=user.id,
         organization_id=org.id,
         role="admin",
-        is_active=True,
-        can_manage_users=True,
-        can_manage_agents=True,
-        can_view_agents=True,
-        can_manage_billing=True,
-        can_delete_organization=True
+        is_active=True
     )
     db_session.add(user_org)
     await db_session.commit()
@@ -304,16 +303,15 @@ async def test_cascade_deletion_behavior(db_session: AsyncSession):
     await db_session.delete(org)
     await db_session.commit()
 
-    # Verify agent still exists but organization is gone
-    # (This tests that we don't have cascade delete setup)
+    # Verify agent is cascade deleted with the organization
+    # Organization has cascade="all, delete-orphan" on agents relationship
     remaining_agents = await db_session.execute(
         select(Agent).where(Agent.public_id == "delete-test-agent")
     )
     remaining_agent = remaining_agents.scalar_one_or_none()
 
-    # Agent should still exist with dangling organization_id
-    # This behavior may need to be adjusted based on business requirements
-    assert remaining_agent is not None
+    # Agent should be deleted due to cascade delete
+    assert remaining_agent is None
 
 
 @pytest.mark.database

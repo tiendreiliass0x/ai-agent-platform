@@ -1,5 +1,7 @@
 version: '3.8'
 
+name: concierge-ai
+
 services:
   postgres:
     image: pgvector/pgvector:pg16

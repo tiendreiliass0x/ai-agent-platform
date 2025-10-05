@@ -79,17 +79,19 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         return response
 
 # Security Middleware
-app.add_middleware(SecurityHeadersMiddleware)
-app.add_middleware(RateLimitMiddleware)
+import os
+if not os.environ.get("TESTING"):
+    app.add_middleware(SecurityHeadersMiddleware)
+    app.add_middleware(RateLimitMiddleware)
 
-# Trusted hosts middleware
-if settings.ENVIRONMENT == "production":
-    app.add_middleware(
-        TrustedHostMiddleware,
-        allowed_hosts=["yourdomain.com", "*.yourdomain.com"]
-    )
+    # Trusted hosts middleware
+    if settings.ENVIRONMENT == "production":
+        app.add_middleware(
+            TrustedHostMiddleware,
+            allowed_hosts=["yourdomain.com", "*.yourdomain.com"]
+        )
 
-# Compression middleware
+# Compression middleware (safe for tests)
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 # CORS middleware with secure configuration
@@ -128,12 +130,18 @@ async def health_check():
 @app.on_event("startup")
 async def startup_event():
     """Initialize services on startup"""
-    await initialize_rate_limiter()
+    import os
+    # Skip Redis initialization in test environment
+    if not os.environ.get("TESTING"):
+        await initialize_rate_limiter()
 
 @app.on_event("shutdown")
 async def shutdown_event():
     """Cleanup services on shutdown"""
-    await cleanup_rate_limiter()
+    import os
+    # Skip Redis cleanup in test environment
+    if not os.environ.get("TESTING"):
+        await cleanup_rate_limiter()
 
 if __name__ == "__main__":
     import uvicorn

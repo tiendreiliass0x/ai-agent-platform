@@ -24,7 +24,6 @@ from app.services.domain_expertise_service import domain_expertise_service
 from app.services.intelligent_fallback_service import intelligent_fallback_service
 from app.services.rag_service import RAGService
 from app.services.database_service import db_service
-from app.services.context_compression import compress_context_snippet
 
 router = APIRouter()
 

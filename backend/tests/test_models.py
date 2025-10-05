@@ -249,12 +249,7 @@ async def test_model_cascade_behavior(db_session: AsyncSession):
         user_id=user.id,
         organization_id=org.id,
         role="admin",
-        is_active=True,
-        can_manage_users=True,
-        can_manage_agents=True,
-        can_view_agents=True,
-        can_manage_billing=False,
-        can_delete_organization=False
+        is_active=True
     )
     db_session.add(user_org)
     await db_session.commit()
@@ -309,24 +304,20 @@ async def test_user_organization_permissions_model(db_session: AsyncSession, tes
         user_id=test_user.id,
         organization_id=test_organization.id,
         role="member",
-        is_active=True,
-        can_manage_users=False,
-        can_manage_agents=True,
-        can_view_agents=True,
-        can_manage_billing=False,
-        can_delete_organization=False
+        is_active=True
     )
 
     db_session.add(user_org)
     await db_session.commit()
     await db_session.refresh(user_org)
 
-    # Test permission fields
-    assert user_org.can_manage_users is False
-    assert user_org.can_manage_agents is True
-    assert user_org.can_view_agents is True
-    assert user_org.can_manage_billing is False
-    assert user_org.can_delete_organization is False
+    # Test permission properties are computed based on role
+    # member role should have no permissions
+    assert user_org.can_manage_users is False  # Only owner/admin can manage users
+    assert user_org.can_manage_agents is False  # Only owner/admin can manage agents
+    assert user_org.can_view_agents is False  # Members cannot view agents (need viewer+ role)
+    assert user_org.can_manage_billing is False  # Only owner/admin can manage billing
+    assert user_org.can_delete_organization is False  # Only owner can delete
     assert user_org.role == "member"
 
 

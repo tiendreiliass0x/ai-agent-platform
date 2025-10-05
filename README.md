@@ -1,6 +1,6 @@
 # AI Agent Platform
 
-A platform for creating AI agents that companies can embed on their websites as helpful assistant concierges.
+A platform for creating True AI agents that can handle users request, computer use by ingest all sort of documents
 
 ## 🚀 Quick Start
 

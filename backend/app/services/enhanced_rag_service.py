@@ -10,7 +10,7 @@ from datetime import datetime
 from dataclasses import asdict
 
 from app.services.concierge_intelligence_service import concierge_intelligence, ConciergeCase
-from app.services.contextual_case_builder import contextual_case_builder
+from app.services.context.contextual_case_builder import contextual_case_builder
 from app.services.intelligent_rag_service import intelligent_rag_service
 from app.services.gemini_service import gemini_service
 from app.services.memory_service import memory_service

@@ -3,6 +3,7 @@ User context API endpoints.
 """
 
 from typing import List, Optional
+from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
@@ -40,7 +41,7 @@ class UserContextResponse(BaseModel):
     name: str
     plan: str
     is_active: bool
-    created_at: str
+    created_at: datetime
     organizations: List[OrganizationContextResponse]
     default_organization_id: Optional[int] = None
 
