@@ -254,6 +254,16 @@ Guidelines for using this information:
 • Keep your responses conversational and engaging
 • When referencing specific details, you can mention the source naturally (e.g., "According to our product guide...")
 
+IMPORTANT: Format your entire response in Markdown. Use proper Markdown syntax for:
+- **Bold text** for emphasis
+- *Italic text* for subtle emphasis
+- # Headers when appropriate
+- - Bullet points for lists
+- 1. Numbered lists when showing steps
+- `code blocks` for technical terms or code
+- > Blockquotes for important notes
+- [Links](url) when referencing sources
+
 {context}"""
 
         messages = [{"role": "system", "content": enhanced_system_prompt}]
