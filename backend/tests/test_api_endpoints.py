@@ -3,7 +3,7 @@ API endpoint tests for critical user and organization functionality.
 """
 
 import pytest
-from fastapi.testclient import TestClient
+from tests.testclient import TestClient
 from unittest.mock import patch, AsyncMock, Mock
 
 from app.models.user import User

@@ -4,7 +4,7 @@ Domain Expertise Service - Revolutionary concierge intelligence with personas an
 
 import asyncio
 from typing import Dict, List, Any, Optional, Tuple
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
 
 from app.services.database_service import db_service
@@ -27,6 +27,8 @@ class RetrievalCandidate:
     doc_title: Optional[str] = None
     timestamp: Optional[datetime] = None
     source_type: str = "internal"  # "internal", "web", "site"
+    metadata: Optional[Dict[str, Any]] = None
+    confidence_score: Optional[float] = None
 
 
 @dataclass
@@ -50,6 +52,419 @@ class DomainExpertiseService(LoggerMixin):
             "high": 0.8,
             "medium": 0.6,
             "low": 0.4
+        }
+
+    async def _get_organization_agents(self, organization_id: int) -> List[Any]:
+        """Safe wrapper around db_service.get_organization_agents"""
+
+        try:
+            agents = await db_service.get_organization_agents(organization_id)
+            return list(agents or [])
+        except Exception as exc:  # pragma: no cover - defensive logging
+            self.log_error(
+                "Failed to load organization agents",
+                organization_id=organization_id,
+                error=str(exc)
+            )
+            return []
+
+    async def _retrieve_from_agent(
+        self,
+        query: str,
+        agent: Any,
+        top_k: int = 5,
+        allowed_document_ids: Optional[set] = None
+    ) -> List[RetrievalCandidate]:
+        """Fetch knowledge for a single agent"""
+
+        agent_id = getattr(agent, "id", None)
+        if agent_id is None and isinstance(agent, dict):
+            agent_id = agent.get("id")
+
+        if agent_id is None:
+            return []
+
+        try:
+            results = await self.document_processor.search_similar_content(
+                query=query,
+                agent_id=agent_id,
+                top_k=top_k
+            )
+        except Exception as exc:
+            self.log_warning(
+                "Agent retrieval failed",
+                agent_id=agent_id,
+                error=str(exc)
+            )
+            raise
+
+        candidates: List[RetrievalCandidate] = []
+        for result in results or []:
+            metadata = result.get("metadata") or {}
+            document_id = (
+                metadata.get("document_id")
+                or metadata.get("chunk_id")
+                or metadata.get("source")
+                or f"{agent_id}_doc"
+            )
+
+            if allowed_document_ids is not None and document_id not in allowed_document_ids:
+                continue
+
+            timestamp = metadata.get("timestamp")
+            if isinstance(timestamp, str):
+                try:
+                    timestamp = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+                except ValueError:
+                    timestamp = None
+
+            candidates.append(
+                RetrievalCandidate(
+                    doc_id=str(document_id),
+                    content=result.get("text", ""),
+                    score=float(result.get("score", 0.0)),
+                    source_url=metadata.get("source_url"),
+                    doc_title=metadata.get("title") or metadata.get("source"),
+                    timestamp=timestamp,
+                    source_type=metadata.get("source_type", "internal"),
+                    metadata=metadata
+                )
+            )
+
+        return candidates
+
+    async def retrieve_multi_agent_knowledge(
+        self,
+        query: str,
+        organization_id: int,
+        top_k_per_agent: int = 3,
+        max_agents: Optional[int] = None,
+        knowledge_pack: Optional[Any] = None
+    ) -> List[RetrievalCandidate]:
+        """Aggregate knowledge across multiple agents"""
+
+        if not query or not query.strip():
+            return []
+
+        agents = await self._get_organization_agents(organization_id)
+        if not agents:
+            return []
+
+        if max_agents:
+            agents = agents[:max_agents]
+
+        allowed_document_ids = None
+        if knowledge_pack and getattr(knowledge_pack, "sources", None):
+            allowed_document_ids = {
+                source.source_id for source in knowledge_pack.sources if getattr(source, "is_active", True)
+            }
+
+        retrieval_tasks = [
+            self._retrieve_from_agent(query, agent, top_k_per_agent, allowed_document_ids)
+            for agent in agents
+        ]
+
+        aggregated: List[RetrievalCandidate] = []
+        results = await asyncio.gather(*retrieval_tasks, return_exceptions=True)
+        for agent, result in zip(agents, results):
+            if isinstance(result, Exception):
+                agent_id = getattr(agent, "id", None)
+                if agent_id is None and isinstance(agent, dict):
+                    agent_id = agent.get("id")
+                self.log_warning(
+                    "Agent retrieval encountered error",
+                    agent_id=agent_id,
+                    error=str(result)
+                )
+                continue
+            aggregated.extend(result)
+
+        if knowledge_pack:
+            aggregated = await self._apply_knowledge_pack_filter(aggregated, knowledge_pack)
+
+        if not aggregated:
+            return []
+
+        return await self._calculate_confidence_scores(aggregated, query)
+
+    async def _apply_knowledge_pack_filter(
+        self,
+        candidates: List[RetrievalCandidate],
+        knowledge_pack: Any
+    ) -> List[RetrievalCandidate]:
+        """Apply knowledge pack-specific filtering while keeping fallbacks"""
+
+        if not candidates or not knowledge_pack:
+            return candidates
+
+        filtered = self._filter_by_knowledge_pack(candidates, knowledge_pack)
+        return filtered if filtered else candidates
+
+    def _filter_by_knowledge_pack(
+        self,
+        candidates: List[RetrievalCandidate],
+        knowledge_pack: Any
+    ) -> List[RetrievalCandidate]:
+        """Filter candidates that match knowledge pack themes"""
+
+        if not knowledge_pack:
+            return candidates
+
+        terms: List[str] = []
+        if isinstance(knowledge_pack, str):
+            terms = [knowledge_pack.lower()]
+        else:
+            for attr in ("name", "slug", "category", "type"):
+                value = getattr(knowledge_pack, attr, None)
+                if value:
+                    terms.append(str(value).lower())
+            for keyword in getattr(knowledge_pack, "keywords", []) or []:
+                terms.append(str(keyword).lower())
+
+        if not terms:
+            return candidates
+
+        filtered: List[RetrievalCandidate] = []
+        for candidate in candidates:
+            content_lower = candidate.content.lower()
+            metadata_text = " ".join(
+                str(value).lower() for value in (candidate.metadata or {}).values()
+                if isinstance(value, str)
+            )
+            if any(term in content_lower or term in metadata_text for term in terms):
+                filtered.append(candidate)
+
+        return filtered
+
+    async def _calculate_confidence_scores(
+        self,
+        candidates: List[RetrievalCandidate],
+        query: str
+    ) -> List[RetrievalCandidate]:
+        """Annotate candidates with confidence scores"""
+
+        if not candidates:
+            return []
+
+        now = datetime.now(timezone.utc)
+        for candidate in candidates:
+            length_factor = min(1.0, len(candidate.content) / 400) if candidate.content else 0.2
+
+            recency_factor = 0.7
+            timestamp = candidate.timestamp
+            if isinstance(timestamp, str):
+                try:
+                    timestamp = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+                except ValueError:
+                    timestamp = None
+
+            if isinstance(timestamp, datetime):
+                try:
+                    ts = timestamp if timestamp.tzinfo else timestamp.replace(tzinfo=timezone.utc)
+                    delta_days = max(0, (now - ts).days)
+                    recency_factor = max(0.4, 1 - (delta_days / 365))
+                except Exception:  # pragma: no cover - safety
+                    recency_factor = 0.7
+
+            base_score = candidate.score if candidate.score is not None else 0.0
+            confidence = (base_score * 0.6) + (length_factor * 0.2) + (recency_factor * 0.2)
+            candidate.confidence_score = round(min(0.99, max(confidence, 0.0)), 3)
+
+        candidates.sort(key=lambda c: (c.confidence_score or 0.0, c.score), reverse=True)
+        return candidates
+
+    async def _enhance_with_persona(
+        self,
+        context: str,
+        persona: Any,
+        query: str
+    ) -> str:
+        """Augment context with persona voice"""
+
+        if not persona:
+            return context
+
+        persona_key = persona
+        if not isinstance(persona_key, str):
+            persona_key = getattr(persona, "template_name", None) or getattr(persona, "name", "")
+        persona_key = str(persona_key).lower()
+
+        persona_styles = {
+            "technical_expert": "Provide a precise technical breakdown tailored to an engineering audience.",
+            "business_consultant": "Frame the insights in terms of ROI, risk mitigation, and strategic alignment.",
+            "startup_advisor": "Highlight agile execution tips and rapid experimentation ideas for founders.",
+            "sales_rep": "Emphasize customer value, differentiators, and next steps to drive the deal forward.",
+            "solutions_engineer": "Detail architecture choices, integrations, and scalability considerations.",
+            "default": "Deliver a balanced, user-friendly explanation with actionable steps."
+        }
+
+        persona_instruction = persona_styles.get(persona_key, persona_styles["default"])
+        enhancement = (
+            f"Persona Guidance ({persona_key or 'general'}): {persona_instruction} "
+            f"Address the query explicitly: '{query}'."
+        )
+        return f"{context}\n\n{enhancement}"
+
+    async def _perform_web_search(
+        self,
+        query: str,
+        site_whitelist: Optional[List[str]] = None,
+        context: Optional[Dict[str, Any]] = None,
+        agent_id: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
+        """Compatibility wrapper returning lightweight dict results"""
+
+        candidates = await self._web_search(
+            message=query,
+            site_whitelist=site_whitelist or [],
+            context=context or {},
+            agent_id=agent_id
+        )
+
+        return [
+            {
+                "title": candidate.doc_title or candidate.doc_id,
+                "content": candidate.content,
+                "url": candidate.source_url,
+                "score": candidate.score,
+                "source_type": candidate.source_type,
+            }
+            for candidate in candidates
+        ]
+
+    async def _supplement_with_web_search(
+        self,
+        query: str,
+        existing_candidates: List[RetrievalCandidate],
+        max_web_results: int = 3,
+        site_whitelist: Optional[List[str]] = None,
+        context: Optional[Dict[str, Any]] = None,
+        agent_id: Optional[int] = None
+    ) -> List[RetrievalCandidate]:
+        """Blend existing knowledge with additional web results"""
+
+        web_entries = await self._perform_web_search(
+            query=query,
+            site_whitelist=site_whitelist,
+            context=context,
+            agent_id=agent_id
+        )
+
+        blended = list(existing_candidates or [])
+        for entry in (web_entries or [])[:max_web_results]:
+            blended.append(
+                RetrievalCandidate(
+                    doc_id=str(entry.get("url") or f"web_{len(blended)}"),
+                    content=entry.get("content", ""),
+                    score=float(entry.get("score", 0.65)),
+                    source_url=entry.get("url"),
+                    doc_title=entry.get("title"),
+                    timestamp=datetime.now(timezone.utc),
+                    source_type=entry.get("source_type", "web"),
+                    metadata=entry
+                )
+            )
+
+        return blended
+
+    async def _match_specialized_agents(
+        self,
+        query: str,
+        available_agents: List[Dict[str, Any]],
+        max_matches: int = 3
+    ) -> List[Dict[str, Any]]:
+        """Match query intent to agent expertise"""
+
+        if not available_agents:
+            return []
+
+        query_terms = {term.strip('"').strip(".,?").lower() for term in query.split() if term}
+        scored: List[Tuple[int, Dict[str, Any]]] = []
+
+        for agent in available_agents:
+            expertise = ""
+            if isinstance(agent, dict):
+                expertise = str(agent.get("expertise", "")).lower()
+            else:
+                expertise = str(getattr(agent, "expertise", "")).lower()
+
+            overlap = sum(1 for term in query_terms if term and term in expertise)
+            if overlap:
+                scored.append((overlap, agent))
+
+        if not scored:
+            return available_agents[:max_matches]
+
+        scored.sort(key=lambda item: item[0], reverse=True)
+        return [agent for _, agent in scored[:max_matches]]
+
+    async def _synthesize_cross_domain_knowledge(
+        self,
+        candidates: List[RetrievalCandidate],
+        query: str,
+        domains: List[str]
+    ) -> str:
+        """Produce a narrative that blends multiple domain insights"""
+
+        if not candidates:
+            return ""
+
+        sections: List[str] = []
+        for domain in domains or []:
+            domain_lower = domain.lower()
+            domain_snippets = [
+                candidate.content
+                for candidate in candidates
+                if domain_lower in candidate.content.lower()
+            ]
+            if domain_snippets:
+                sections.append(f"{domain.title()} Insights: {domain_snippets[0]}")
+
+        if not sections:
+            sections = [candidate.content for candidate in candidates[:3]]
+
+        sections.append(f"Query: {query}")
+        return "\n\n".join(sections)
+
+    async def _verify_answer_grounding(
+        self,
+        answer: str,
+        sources: List[RetrievalCandidate],
+        query: str
+    ) -> Dict[str, Any]:
+        """Assess how well the answer is grounded in provided sources"""
+
+        support_count = len(sources)
+        strong_support = len([source for source in sources if source.score >= 0.7])
+
+        confidence = 0.5 + (0.1 * strong_support) + (0.05 * support_count)
+        confidence = min(0.99, confidence)
+        grounding_quality = "high" if confidence >= 0.75 else ("medium" if confidence >= 0.6 else "low")
+
+        return {
+            "confidence_score": round(confidence, 3),
+            "grounding_quality": grounding_quality,
+            "supporting_sources": [source.doc_id for source in sources],
+            "answer_excerpt": answer[:200],
+            "query": query,
+        }
+
+    async def _learn_from_feedback(self, feedback: Dict[str, Any]) -> Dict[str, Any]:
+        """Incorporate user feedback into lightweight heuristics"""
+
+        rating = float(feedback.get("user_rating", 0))
+        adjustment = max(0.0, min(1.0, rating / 5.0))
+
+        updated_weights = {
+            "relevance": round(0.5 + (0.2 * adjustment), 3),
+            "recency": round(0.3 + (0.2 * adjustment), 3),
+            "persona_alignment": round(0.2 + (0.1 * adjustment), 3),
+        }
+
+        return {
+            "updated_weights": updated_weights,
+            "improved_ranking": adjustment > 0.3,
+            "captured_feedback": feedback.get("feedback", ""),
         }
 
     async def answer_with_domain_expertise(

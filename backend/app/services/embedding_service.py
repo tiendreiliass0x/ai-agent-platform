@@ -1,10 +1,14 @@
 import asyncio
 import hashlib
 import json
+import os
 from typing import List, Any, Optional
 import openai
-from sentence_transformers import SentenceTransformer
-import numpy as np
+
+if os.environ.get("TESTING") != "1":
+    from sentence_transformers import SentenceTransformer  # type: ignore
+else:
+    SentenceTransformer = None  # type: ignore
 
 from app.core.config import settings
 
@@ -17,7 +21,8 @@ except ImportError:
 
 class EmbeddingService:
     def __init__(self):
-        self.openai_client = openai.AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+        self.use_remote_embeddings = bool(settings.OPENAI_API_KEY and os.environ.get("TESTING") != "1")
+        self.openai_client = openai.AsyncOpenAI(api_key=settings.OPENAI_API_KEY) if self.use_remote_embeddings else None
         self.model_name = "text-embedding-3-large"
         self.embedding_dimension = 3072
 
@@ -50,7 +55,7 @@ class EmbeddingService:
 
         # Generate embeddings
         try:
-            if settings.OPENAI_API_KEY:
+            if self.use_remote_embeddings:
                 embeddings = await self._generate_openai_embeddings(texts)
             else:
                 embeddings = await self._generate_local_embeddings(texts)
@@ -126,6 +131,9 @@ class EmbeddingService:
 
     async def _generate_local_embeddings(self, texts: List[str]) -> List[List[float]]:
         """Generate embeddings using local sentence-transformers model"""
+        if SentenceTransformer is None:
+            return [self._deterministic_embedding(text) for text in texts]
+
         if self.fallback_model is None:
             self.fallback_model = SentenceTransformer('all-MiniLM-L6-v2')
 
@@ -140,9 +148,15 @@ class EmbeddingService:
         # Convert numpy arrays to lists
         return [embedding.tolist() for embedding in embeddings]
 
+    def _deterministic_embedding(self, text: str, dimension: int = 384) -> List[float]:
+        """Lightweight fallback embedding without external dependencies."""
+        digest = hashlib.sha256(text.encode("utf-8")).digest()
+        repeats = (digest * ((dimension // len(digest)) + 1))[:dimension]
+        return [byte / 255.0 for byte in repeats]
+
     def get_embedding_dimension(self) -> int:
         """Get the dimension of embeddings"""
-        if settings.OPENAI_API_KEY:
+        if self.use_remote_embeddings:
             return self.embedding_dimension
         else:
             # all-MiniLM-L6-v2 has 384 dimensions
