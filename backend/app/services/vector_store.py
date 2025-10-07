@@ -1,8 +1,8 @@
+import os
 import asyncio
 from typing import List, Dict, Any, Optional, Union
 import uuid
 from pinecone import Pinecone, ServerlessSpec
-import numpy as np
 
 from app.core.config import settings
 
@@ -17,7 +17,7 @@ class VectorStoreService:
         if self._initialized:
             return True
 
-        if not settings.PINECONE_API_KEY:
+        if os.environ.get("TESTING") == "1" or not settings.PINECONE_API_KEY:
             print("Warning: Pinecone API key not set. Vector operations will use mock data.")
             self._initialized = True
             return False
@@ -106,7 +106,8 @@ class VectorStoreService:
         query_embedding: List[float],
         agent_id: int,
         top_k: int = 5,
-        score_threshold: float = 0.7
+        score_threshold: float = 0.7,
+        filters: Optional[Dict[str, Any]] = None
     ) -> List[Dict[str, Any]]:
         """Search for similar vectors"""
         # Lazy initialization
@@ -123,13 +124,17 @@ class VectorStoreService:
 
         try:
             # Search with agent_id filter
+            vector_filters = {"agent_id": agent_id}
+            if filters:
+                vector_filters.update(filters)
+
             response = await asyncio.get_event_loop().run_in_executor(
                 None,
                 lambda: self.index.query(
                     vector=query_embedding,
                     top_k=top_k,
                     include_metadata=True,
-                    filter={"agent_id": agent_id}
+                    filter=vector_filters
                 )
             )
 

@@ -11,7 +11,7 @@ import pytest
 import json
 from datetime import datetime
 from unittest.mock import patch, AsyncMock, MagicMock
-from fastapi.testclient import TestClient
+from tests.testclient import TestClient
 from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 

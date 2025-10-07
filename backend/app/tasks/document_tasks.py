@@ -1,3 +1,4 @@
+
 """Celery tasks for document processing."""
 
 from __future__ import annotations
@@ -162,7 +163,6 @@ async def _process_document_workflow(
         "vector_count": len(vector_ids),
         "filename": filename,
     }
-
 
 @celery_app.task(
     name="app.tasks.document_tasks.process_document",
@@ -385,4 +385,5 @@ def process_webpage(
         )
 
         _run_sync(_mark_document_failed(document_id, str(exc)))
+
         raise
