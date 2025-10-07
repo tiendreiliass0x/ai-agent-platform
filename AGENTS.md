@@ -14,6 +14,7 @@
 - `npm run build` | `make build`: Build frontend (and Docker via Makefile).
 - `npm test` | `make test`: Run frontend Jest + backend pytest.
 - `npm run lint` | `make lint`: ESLint for frontend, Ruff for backend.
+- `source backend/venv-clean/bin/activate && uv run python3 <file>`: run a python file
 
 ## Coding Style & Naming
 - Python: PEP 8, 4-space indent; `snake_case` for functions/vars, `PascalCase` for classes. Lint with `ruff check .`.
