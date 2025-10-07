@@ -14,6 +14,7 @@ from .governance_test import router as governance_test_router
 from .integrations import router as integrations_router
 from ..endpoints.chat import router as public_chat_router
 from .crawler import router as crawler_router
+from .tasks import router as tasks_router
 
 api_router = APIRouter()
 
@@ -29,3 +30,4 @@ api_router.include_router(governance_test_router, prefix="/governance", tags=["g
 api_router.include_router(integrations_router, prefix="/integrations", tags=["integrations"])
 api_router.include_router(public_chat_router, prefix="/chat", tags=["chat-public"])
 api_router.include_router(crawler_router, prefix="/crawl", tags=["crawl"])
+api_router.include_router(tasks_router, prefix="/tasks", tags=["tasks"])
