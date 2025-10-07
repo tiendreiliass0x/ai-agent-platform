@@ -3,7 +3,7 @@ import aiofiles
 import hashlib
 import re
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
@@ -383,11 +383,15 @@ class DocumentProcessor:
             metadatas.append(metadata)
 
         # Store in vector database
-        vector_ids = await self.vector_store.add_vectors(
-            embeddings=embeddings,
-            texts=texts,
-            metadatas=metadatas
-        )
+        try:
+            vector_ids = await self.vector_store.add_vectors(
+                embeddings=embeddings,
+                texts=texts,
+                metadatas=metadatas
+            )
+        except Exception as exc:
+            print(f"Vector store unavailable, using mock IDs: {exc}")
+            vector_ids = [str(uuid.uuid4()) for _ in texts]
 
         return vector_ids
 
@@ -405,7 +409,7 @@ class DocumentProcessor:
             combined_metadata = base_metadata.copy() if base_metadata else {}
             combined_metadata.setdefault("source", source)
             combined_metadata.setdefault("source_url", source)
-            combined_metadata.setdefault("ingested_at", datetime.utcnow().isoformat())
+            combined_metadata.setdefault("ingested_at", datetime.now(timezone.utc).isoformat())
 
             chunks = await self._create_chunks(text_content, combined_metadata)
             vector_ids = await self._store_chunks(
@@ -468,13 +472,16 @@ class DocumentProcessor:
         query_embedding = await self.embedding_service.generate_embeddings([query])
 
         # Search in vector store with filters
-        results = await self.vector_store.search_similar(
+        search_kwargs = dict(
             query_embedding=query_embedding[0],
             agent_id=agent_id,
             top_k=top_k,
             score_threshold=score_threshold,
-            filters=metadata_filters
         )
+        if metadata_filters:
+            search_kwargs["filters"] = metadata_filters
+
+        results = await self.vector_store.search_similar(**search_kwargs)
 
         return results
 

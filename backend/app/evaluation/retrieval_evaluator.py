@@ -5,15 +5,19 @@ Measures retrieval accuracy, relevance, and coverage.
 
 import json
 import asyncio
+import math
+from statistics import fmean
 from typing import List, Dict, Any, Tuple, Optional
 from dataclasses import dataclass
-import numpy as np
-from sklearn.metrics.pairwise import cosine_similarity
 import openai
 from datetime import datetime
 
 from ..services.rag_service import RAGService
 from ..core.config import settings
+
+
+def _mean(values: List[float]) -> float:
+    return fmean(values) if values else 0.0
 
 
 @dataclass
@@ -147,12 +151,12 @@ class RetrievalEvaluator:
         dcg = 0.0
         for i, chunk in enumerate(retrieved):
             relevance = 1.0 if chunk in expected_set else 0.0
-            dcg += relevance / np.log2(i + 2)  # i+2 because log2(1) = 0
+            dcg += relevance / math.log2(i + 2)  # i+2 because log2(1) = 0
 
         # Calculate IDCG (Ideal DCG) - if all expected chunks were at the top
         idcg = 0.0
         for i in range(min(len(retrieved), len(expected_set))):
-            idcg += 1.0 / np.log2(i + 2)
+            idcg += 1.0 / math.log2(i + 2)
 
         return dcg / idcg if idcg > 0 else 0.0
 
@@ -182,9 +186,7 @@ class RetrievalEvaluator:
             for key in metrics_lists:
                 metrics_lists[key].append(getattr(metrics, key))
 
-        return {
-            key: np.mean(values) for key, values in metrics_lists.items()
-        }
+        return {key: _mean(values) for key, values in metrics_lists.items()}
 
     def _metrics_by_difficulty(self, results: List[Dict]) -> Dict[str, Dict[str, float]]:
         """Calculate metrics grouped by difficulty level"""

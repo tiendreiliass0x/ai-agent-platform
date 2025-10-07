@@ -4,14 +4,44 @@ Advanced context synthesis, ranking, and optimization for intelligent agents.
 """
 
 import asyncio
-import numpy as np
+import math
+import os
 from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime, timedelta
-from sklearn.metrics.pairwise import cosine_similarity
 from dataclasses import dataclass
+
+if os.environ.get("TESTING") != "1":  # Avoid heavy optional deps in test runs
+    import numpy as np  # type: ignore
+    from sklearn.metrics.pairwise import cosine_similarity  # type: ignore
+else:
+    np = None  # type: ignore
+    cosine_similarity = None  # type: ignore
 
 from app.services.gemini_service import gemini_service
 from app.services.memory_service import memory_service
+
+
+def _safe_mean(values: List[float]) -> float:
+    filtered = [value for value in values if value is not None]
+    if not filtered:
+        return 0.0
+    if np is not None:
+        return float(np.mean(filtered))  # type: ignore[arg-type]
+    return sum(filtered) / len(filtered)
+
+
+def _cosine_similarity(vec_a: List[float], vec_b: List[float]) -> float:
+    if not vec_a or not vec_b:
+        return 0.0
+    if cosine_similarity is not None:
+        return float(cosine_similarity([vec_a], [vec_b])[0][0])  # type: ignore[index]
+
+    dot_product = sum(a * b for a, b in zip(vec_a, vec_b))
+    norm_a = math.sqrt(sum(a * a for a in vec_a))
+    norm_b = math.sqrt(sum(b * b for b in vec_b))
+    if not norm_a or not norm_b:
+        return 0.0
+    return dot_product / (norm_a * norm_b)
 
 
 @dataclass
@@ -173,11 +203,7 @@ class ContextEngine:
         try:
             content_embedding = await gemini_service.generate_embeddings([content])
             if content_embedding and content_embedding[0]:
-                similarity = cosine_similarity(
-                    [query_embedding],
-                    [content_embedding[0]]
-                )[0][0]
-                return float(similarity)
+                return _cosine_similarity(query_embedding, content_embedding[0])
         except Exception:
             pass
 
@@ -204,7 +230,7 @@ class ContextEngine:
 
             days_ago = (datetime.utcnow() - date.replace(tzinfo=None)).days
             # Exponential decay: score = e^(-days/30)
-            return max(np.exp(-days_ago / 30), 0.1)
+            return max(math.exp(-days_ago / 30), 0.1)
         except Exception:
             return 0.5
 
@@ -401,8 +427,8 @@ class ContextEngine:
             return 0.0
 
         # Quality factors
-        avg_relevance = np.mean([c.relevance_score for c in chunks])
-        avg_importance = np.mean([c.importance for c in chunks])
+        avg_relevance = _safe_mean([c.relevance_score for c in chunks])
+        avg_importance = _safe_mean([c.importance for c in chunks])
         source_diversity = len(set(c.source_type for c in chunks)) / 5  # 5 possible sources
 
         quality_score = (avg_relevance * 0.5 + avg_importance * 0.3 + source_diversity * 0.2)

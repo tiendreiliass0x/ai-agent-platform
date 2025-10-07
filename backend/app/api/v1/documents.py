@@ -3,7 +3,7 @@ API endpoints for document management.
 """
 
 from typing import List, Dict, Any, Optional
-from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File
 from pydantic import BaseModel
 import tempfile
 import logging
@@ -11,6 +11,7 @@ from pathlib import Path
 from datetime import datetime
 import re
 from uuid import uuid4
+from celery.result import AsyncResult
 
 from ...core.auth import get_current_user
 from ...core.config import settings
@@ -18,6 +19,7 @@ from ...services.database_service import db_service
 from ...models.user import User
 from ...services.document_processor import DocumentProcessor
 from ...services.document_security import document_security
+from ...tasks.document_tasks import process_document, process_webpage
 
 
 document_processor = DocumentProcessor()
@@ -302,16 +304,15 @@ async def create_document(
 @router.post("/agent/{agent_id}/upload")
 async def upload_document(
     agent_id: int,
-    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     current_user: User = Depends(get_current_user)
 ):
     """
-    Upload a file and queue it for background processing.
+    Upload a file and queue it for Celery background processing.
 
-    Returns immediately with document ID and 'queued' status.
-    Processing happens asynchronously in the background.
-    Use GET /documents/{document_id}/status to check processing progress.
+    Returns immediately with document ID, task ID, and 'queued' status.
+    Processing happens asynchronously via Celery worker.
+    Use GET /documents/{document_id}/status or /tasks/{task_id} to check processing progress.
     """
     try:
         # Verify agent exists and user owns it
@@ -393,35 +394,47 @@ async def upload_document(
             vector_ids=[]
         )
 
-        # Save file to temporary location for background processing
+        # Save file to temporary location for Celery task
         temp_file = tempfile.NamedTemporaryFile(delete=False, prefix=f"doc_{document.id}_")
         temp_file.write(file_bytes)
         temp_file.close()
 
-        # Queue background processing task
-        background_tasks.add_task(
-            process_document_background,
-            document_id=document.id,
-            file_path=temp_file.name,
-            agent_id=agent_id,
-            filename=filename,
-            content_type=content_type,
-            organization_id=agent.organization_id
+        # Queue Celery task (high priority queue)
+        task = process_document.apply_async(
+            args=[
+                document.id,
+                temp_file.name,
+                agent_id,
+                filename,
+                content_type,
+                agent.organization_id
+            ],
+            queue='high_priority'
         )
 
-        logger.info(f"Document {document.id} queued for background processing")
+        # Update document metadata with task ID
+        await db_service.update_document(
+            document.id,
+            doc_metadata={
+                **document.doc_metadata,
+                "celery_task_id": task.id
+            }
+        )
 
-        # Return immediately with queued status
+        logger.info(f"Document {document.id} queued for Celery processing (task_id={task.id})")
+
+        # Return immediately with queued status and task ID
         return {
             "id": document.id,
             "filename": document.filename,
             "content_type": document.content_type,
             "size": len(file_bytes),
             "status": "queued",
+            "task_id": task.id,
             "agent_id": document.agent_id,
             "created_at": document.created_at.isoformat(),
             "message": "Document uploaded successfully and queued for processing",
-            "processing_note": f"Use GET /api/v1/documents/{document.id}/status to check processing progress"
+            "processing_note": f"Use GET /api/v1/documents/{document.id}/status or /api/v1/tasks/{task.id} to check processing progress"
         }
 
     except HTTPException:
