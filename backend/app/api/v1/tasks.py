@@ -1,17 +1,17 @@
-"""
-Task status tracking endpoints.
-Provides status and progress information for Celery background tasks.
-"""
+"""Task status and control endpoints for background Celery jobs."""
+
+from __future__ import annotations
 
 import logging
-from typing import Dict, Any, Optional
-from fastapi import APIRouter, HTTPException, Depends
+from typing import Any, Dict, Optional
+
 from celery.result import AsyncResult
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 
 from ...celery_app import celery_app
-from ...core.auth import get_current_user
-from ...models.user import User
+from ...core.auth import SimpleUser, get_current_user
+from ...services.database_service import db_service
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +19,8 @@ router = APIRouter()
 
 
 class TaskStatusResponse(BaseModel):
-    """Response model for task status"""
+    """Response model for task status queries."""
+
     task_id: str
     state: str
     status: Optional[str] = None
@@ -32,151 +33,187 @@ class TaskStatusResponse(BaseModel):
     vector_count: Optional[int] = None
 
 
+async def _get_authorized_task_document(
+    task_id: str,
+    current_user: SimpleUser,
+) -> Any:
+    """Return the document linked to the task after access validation."""
+
+    document = await db_service.get_document_by_task_id(task_id)
+    if not document:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Task not found",
+        )
+
+    agent = await db_service.get_agent_by_id(document.agent_id)
+    if not agent:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Task not found",
+        )
+
+    user_id = getattr(current_user, "id", None)
+    user_org = getattr(current_user, "organization_id", None)
+    is_superuser = bool(getattr(current_user, "is_superuser", False))
+
+    if not (
+        is_superuser
+        or agent.user_id == user_id
+        or (user_org is not None and agent.organization_id == user_org)
+    ):
+        # Return 404 to avoid leaking task existence
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Task not found",
+        )
+
+    return document
+
+
 @router.get("/{task_id}", response_model=TaskStatusResponse)
 async def get_task_status(
     task_id: str,
-    current_user: User = Depends(get_current_user)
-):
-    """
-    Get the status and progress of a Celery task.
+    current_user: SimpleUser = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """Get the status and progress of a Celery task."""
 
-    Task States:
-    - PENDING: Task is waiting to be executed
-    - PROGRESS: Task is currently running (includes progress info)
-    - SUCCESS: Task completed successfully
-    - FAILURE: Task failed with an error
-    - RETRY: Task is being retried
-    - REVOKED: Task was cancelled
+    document = await _get_authorized_task_document(task_id, current_user)
 
-    Args:
-        task_id: Celery task ID
-        current_user: Authenticated user (required for security)
-
-    Returns:
-        TaskStatusResponse with current task state and progress
-    """
     try:
-        # Get task result from Celery
         result = AsyncResult(task_id, app=celery_app)
 
-        response = {
+        response: Dict[str, Any] = {
             "task_id": task_id,
             "state": result.state,
+            "document_id": document.id,
         }
 
-        # Handle different task states
-        if result.state == 'PENDING':
-            response.update({
-                "status": "Task is queued and waiting to be processed",
-                "current": 0,
-                "total": 100
-            })
+        if result.state == "PENDING":
+            response.update(
+                {
+                    "status": "Task is queued and waiting to be processed",
+                    "current": 0,
+                    "total": 100,
+                }
+            )
 
-        elif result.state == 'PROGRESS':
-            # Task is running - extract progress info
-            if isinstance(result.info, dict):
-                response.update({
-                    "status": result.info.get('status', 'Processing...'),
-                    "current": result.info.get('current', 0),
-                    "total": result.info.get('total', 100),
-                    "document_id": result.info.get('document_id'),
-                    "chunk_count": result.info.get('chunk_count'),
-                    "vector_count": result.info.get('vector_count')
-                })
-            else:
-                response.update({
-                    "status": "Processing...",
-                    "current": 50,
-                    "total": 100
-                })
+        elif result.state == "PROGRESS":
+            info = result.info if isinstance(result.info, dict) else {}
+            response.update(
+                {
+                    "status": info.get("status", "Processing..."),
+                    "current": info.get("current", 0),
+                    "total": info.get("total", 100),
+                    "chunk_count": info.get("chunk_count"),
+                    "vector_count": info.get("vector_count"),
+                    "document_id": info.get("document_id", document.id),
+                }
+            )
 
-        elif result.state == 'SUCCESS':
-            # Task completed successfully
-            response.update({
-                "status": "Task completed successfully",
-                "current": 100,
-                "total": 100,
-                "result": result.result if isinstance(result.result, dict) else {"value": result.result}
-            })
+        elif result.state == "SUCCESS":
+            payload = result.result
+            response.update(
+                {
+                    "status": "Task completed successfully",
+                    "current": 100,
+                    "total": 100,
+                    "result": payload if isinstance(payload, dict) else {"value": payload},
+                }
+            )
 
-        elif result.state == 'FAILURE':
-            # Task failed
+        elif result.state == "FAILURE":
             error_message = str(result.info) if result.info else "Unknown error"
-            response.update({
-                "status": "Task failed",
-                "error": error_message
-            })
-            logger.error(f"Task {task_id} failed: {error_message}")
+            response.update(
+                {
+                    "status": "Task failed",
+                    "error": error_message,
+                }
+            )
+            logger.error(
+                "Task failed",
+                extra={"task_id": task_id, "document_id": document.id, "error": error_message},
+            )
 
-        elif result.state == 'RETRY':
-            # Task is being retried
-            response.update({
-                "status": "Task failed and is being retried",
-                "error": str(result.info) if result.info else None
-            })
+        elif result.state == "RETRY":
+            response.update(
+                {
+                    "status": "Task failed and is being retried",
+                    "error": str(result.info) if result.info else None,
+                }
+            )
 
-        elif result.state == 'REVOKED':
-            # Task was cancelled
-            response.update({
-                "status": "Task was cancelled"
-            })
+        elif result.state == "REVOKED":
+            response.update({"status": "Task was cancelled"})
 
         else:
-            # Unknown state
-            response.update({
-                "status": f"Unknown task state: {result.state}"
-            })
+            response.update({"status": f"Unknown task state: {result.state}"})
 
         return response
 
-    except Exception as e:
-        logger.error(f"Error retrieving task status for {task_id}: {str(e)}", exc_info=True)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "Error retrieving task status",
+            extra={"task_id": task_id, "document_id": document.id, "error": str(exc)},
+            exc_info=True,
+        )
         raise HTTPException(
-            status_code=500,
-            detail=f"Failed to retrieve task status: {str(e)}"
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve task status",
         )
 
 
 @router.delete("/{task_id}")
 async def cancel_task(
     task_id: str,
-    current_user: User = Depends(get_current_user)
-):
-    """
-    Cancel a running or pending Celery task.
+    current_user: SimpleUser = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """Cancel a running or pending Celery task."""
 
-    Args:
-        task_id: Celery task ID
-        current_user: Authenticated user (required for security)
+    document = await _get_authorized_task_document(task_id, current_user)
 
-    Returns:
-        Confirmation message
-    """
     try:
         result = AsyncResult(task_id, app=celery_app)
 
-        if result.state in ['SUCCESS', 'FAILURE', 'REVOKED']:
+        if result.state in {"SUCCESS", "FAILURE", "REVOKED"}:
             raise HTTPException(
-                status_code=400,
-                detail=f"Cannot cancel task in state {result.state}"
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Cannot cancel task in state {result.state}",
             )
 
-        # Revoke the task
         result.revoke(terminate=True)
+        logger.info(
+            "Task cancelled",
+            extra={
+                "task_id": task_id,
+                "document_id": document.id,
+                "requested_by": getattr(current_user, "id", None),
+            },
+        )
 
-        logger.info(f"Task {task_id} cancelled by user {current_user.id}")
+        await db_service.update_document(
+            document.id,
+            status="cancelled",
+            error_message="Task cancelled by user",
+        )
 
         return {
             "task_id": task_id,
             "status": "cancelled",
-            "message": "Task has been cancelled"
+            "message": "Task has been cancelled",
         }
 
     except HTTPException:
         raise
-    except Exception as e:
-        logger.error(f"Error cancelling task {task_id}: {str(e)}", exc_info=True)
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "Error cancelling task",
+            extra={"task_id": task_id, "document_id": document.id, "error": str(exc)},
+            exc_info=True,
+        )
         raise HTTPException(
-            status_code=500,
-            detail=f"Failed to cancel task: {str(e)}"
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to cancel task",
         )

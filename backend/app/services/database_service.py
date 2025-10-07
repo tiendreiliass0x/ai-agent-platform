@@ -433,6 +433,33 @@ class DatabaseService:
             await db.refresh(document)
             return document
 
+    async def update_document(
+        self,
+        document_id: int,
+        **updates: Any,
+    ) -> Optional[Document]:
+        """Update simple fields on a document."""
+
+        async with await self.get_session() as db:
+            result = await db.execute(
+                select(Document).where(Document.id == document_id)
+            )
+            document = result.scalar_one_or_none()
+            if not document:
+                return None
+
+            for field, value in updates.items():
+                if field == "doc_metadata" and value is not None:
+                    metadata = document.doc_metadata or {}
+                    metadata.update(value)
+                    document.doc_metadata = metadata
+                elif hasattr(document, field):
+                    setattr(document, field, value)
+
+            await db.commit()
+            await db.refresh(document)
+            return document
+
     async def get_agent_documents(self, agent_id: int) -> List[Document]:
         """Get all documents for an agent"""
         async with await self.get_session() as db:
@@ -453,6 +480,19 @@ class DatabaseService:
                 .where(Document.id.in_(document_ids))
             )
             return result.scalars().all()
+
+    async def get_document_by_task_id(self, task_id: str) -> Optional[Document]:
+        """Get a document associated with a Celery task ID."""
+        if not task_id:
+            return None
+
+        async with await self.get_session() as db:
+            result = await db.execute(
+                select(Document).where(
+                    Document.doc_metadata.contains({"celery_task_id": task_id})
+                )
+            )
+            return result.scalar_one_or_none()
 
     async def get_document_by_id(self, document_id: int) -> Optional[Document]:
         """Get document by ID"""

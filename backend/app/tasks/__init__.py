@@ -1,7 +1,4 @@
-"""
-Celery tasks package.
-Import tasks here to make them discoverable by Celery autodiscover.
-"""
+"""Celery task package initialization."""
 
 from .document_tasks import process_document, process_webpage
 from .crawl_tasks import discover_urls
