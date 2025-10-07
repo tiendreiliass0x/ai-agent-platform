@@ -51,6 +51,28 @@ services:
       - .:/app
     command: ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
 
+  celery-worker:
+    build: .
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://postgres:password@postgres:5432/ai_agent_platform
+      - REDIS_URL=redis://redis:6379
+      - ENVIRONMENT=development
+      - DEBUG=true
+      - CELERY_LOG_LEVEL=info
+      - WORKER_CONCURRENCY_HIGH=4
+      - WORKER_CONCURRENCY_MEDIUM=8
+      - WORKER_CONCURRENCY_LOW=16
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./uploads:/app/uploads
+      - .:/app
+    command: ["bash", "start_celery_worker.sh"]
+    restart: unless-stopped
+
 volumes:
   postgres_data:
   redis_data:

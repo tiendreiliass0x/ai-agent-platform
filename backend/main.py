@@ -1,14 +1,24 @@
+import logging
+import time
+from typing import Dict, Tuple
+
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
+
 from app.api.v1 import api_router
 from app.core.config import settings
 from app.core.exceptions import setup_exception_handlers
 from app.core.rate_limiter import initialize_rate_limiter, cleanup_rate_limiter, check_rate_limit
-import time
-from typing import Dict, Tuple
+
+
+root_logger = logging.getLogger()
+if settings.DEBUG:
+    root_logger.setLevel(logging.DEBUG)
+else:
+    root_logger.setLevel(logging.INFO)
 
 app = FastAPI(
     title="AI Agent Platform API",
