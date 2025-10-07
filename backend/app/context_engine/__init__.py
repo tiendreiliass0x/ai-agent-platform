@@ -21,6 +21,7 @@ from .hybrid_retriever import HybridRetriever
 from .knowledge_graph_builder import KnowledgeGraphBuilder
 from .source_tracker import SourceTracker
 from .quality_metrics import ContextQualityMetrics
+from .reranker import Reranker
 
 __all__ = [
     "SemanticChunker",
@@ -29,6 +30,7 @@ __all__ = [
     "KnowledgeGraphBuilder",
     "SourceTracker",
     "ContextQualityMetrics",
+    "Reranker",
 ]
 
 __version__ = "0.1.0"
