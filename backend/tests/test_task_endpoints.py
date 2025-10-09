@@ -68,7 +68,7 @@ def test_get_task_status_authorized_returns_progress(monkeypatch):
     _override_user(user)
 
     with TestClient(app) as client:
-        response = client.get("/api/v1/tasks/test-task")
+        response = client.get(f"/api/v1/tasks/{VALID_TASK_ID}")
 
     assert response.status_code == 200
     body = response.json()
@@ -97,7 +97,7 @@ def test_get_task_status_unauthorized_returns_404(monkeypatch):
     _override_user(user)
 
     with TestClient(app) as client:
-        response = client.get("/api/v1/tasks/test-task")
+        response = client.get(f"/api/v1/tasks/{VALID_TASK_ID}")
 
     assert response.status_code == 404
 
@@ -134,9 +134,36 @@ def test_cancel_task_revokes_and_marks_cancelled(monkeypatch):
     _override_user(user)
 
     with TestClient(app) as client:
-        response = client.delete("/api/v1/tasks/test-task")
+        response = client.delete(f"/api/v1/tasks/{VALID_TASK_ID}")
 
     assert response.status_code == 200
     assert CancelAsyncResult.last_instance is not None
     assert CancelAsyncResult.last_instance.revoked is True
     assert updates and updates[-1]["status"] == "cancelled"
+
+
+def test_get_task_status_invalid_task_id_returns_400(monkeypatch):
+    user = SimpleUser(
+        id=42,
+        email="user@example.com",
+        name="Test User",
+        organization_id=7,
+    )
+
+    called = {"get_document": False}
+
+    async def fake_get_document_by_task_id(task_id: str):  # pragma: no cover - should not be hit
+        called["get_document"] = True
+        return SimpleNamespace(id=1, agent_id=55)
+
+    monkeypatch.setattr(tasks_module.db_service, "get_document_by_task_id", fake_get_document_by_task_id)
+
+    _override_user(user)
+
+    with TestClient(app) as client:
+        response = client.get("/api/v1/tasks/not-a-valid-id")
+
+    assert response.status_code == 400
+    assert "Invalid task ID format" in response.text
+    assert called["get_document"] is False
+VALID_TASK_ID = "123e4567-e89b-12d3-a456-426614174000"

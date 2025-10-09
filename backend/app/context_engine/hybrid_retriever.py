@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 import numpy as np
 from collections import Counter
 import math
+import re
 
 
 @dataclass
@@ -44,8 +45,10 @@ class BM25:
             k1: Term frequency saturation parameter (1.2-2.0 typical)
             b: Length normalization parameter (0.75 typical)
         """
+
         self.k1 = k1
         self.b = b
+        self.max_corpus_size = 20000
         self.corpus = []
         self.corpus_size = 0
         self.avgdl = 0  # Average document length
@@ -60,6 +63,12 @@ class BM25:
         Args:
             corpus: List of documents (strings)
         """
+        if len(corpus) > self.max_corpus_size:
+            raise ValueError(
+                f"Corpus size {len(corpus)} exceeds BM25 safety limit ({self.max_corpus_size}). "
+                "Consider streaming the corpus or increasing BM25.max_corpus_size consciously."
+            )
+
         self.corpus_size = len(corpus)
         self.corpus = corpus
 
@@ -127,16 +136,12 @@ class BM25:
         return results
 
     def _tokenize(self, text: str) -> List[str]:
-        """Simple tokenization (can be improved with proper tokenizer)"""
-        # Lowercase and split on whitespace/punctuation
-        text = text.lower()
-        # Simple split (could use nltk or spacy for better tokenization)
-        tokens = text.split()
-        # Remove punctuation
-        tokens = [''.join(c for c in token if c.isalnum()) for token in tokens]
-        # Remove empty tokens
-        tokens = [t for t in tokens if t]
-        return tokens
+        """
+        Lightweight tokenizer: retains hyphenated compounds and acronyms.
+        Replace with spaCy or NLTK for full production readiness.
+        """
+        token_pattern = re.compile(r"[0-9a-z]+(?:[\\-'][0-9a-z]+)*", re.IGNORECASE)
+        return [match.group(0).lower() for match in token_pattern.finditer(text)]
 
 
 class HybridRetriever:
@@ -155,7 +160,8 @@ class HybridRetriever:
         metadata: Optional[List[Dict[str, Any]]] = None,
         embeddings: Optional[np.ndarray] = None,
         k1: float = 1.5,
-        b: float = 0.75
+        b: float = 0.75,
+        max_bm25_corpus_size: int = 20000,
     ):
         """
         Initialize hybrid retriever.
@@ -166,6 +172,7 @@ class HybridRetriever:
             embeddings: Optional pre-computed embeddings (shape: [n_docs, embedding_dim])
             k1: BM25 term frequency saturation
             b: BM25 length normalization
+            max_bm25_corpus_size: Safety guard for BM25 corpus size (prevents OOM)
         """
         self.corpus = corpus or []
         self.metadata = metadata or []
@@ -173,6 +180,7 @@ class HybridRetriever:
 
         # Initialize BM25
         self.bm25 = BM25(k1=k1, b=b)
+        self.bm25.max_corpus_size = max_bm25_corpus_size
         if self.corpus:
             self.bm25.fit(self.corpus)
 

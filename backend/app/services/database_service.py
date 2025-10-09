@@ -488,11 +488,20 @@ class DatabaseService:
 
         async with await self.get_session() as db:
             result = await db.execute(
-                select(Document).where(
-                    Document.doc_metadata.contains({"celery_task_id": task_id})
-                )
+                select(Document).where(Document.celery_task_id == task_id)
             )
-            return result.scalar_one_or_none()
+            document = result.scalar_one_or_none()
+
+            if document is None:
+                # Fallback for legacy records where celery_task_id lives only in metadata
+                legacy_result = await db.execute(
+                    select(Document).where(
+                        Document.doc_metadata.contains({"celery_task_id": task_id})
+                    )
+                )
+                document = legacy_result.scalar_one_or_none()
+
+            return document
 
     async def get_document_by_id(self, document_id: int) -> Optional[Document]:
         """Get document by ID"""

@@ -34,6 +34,8 @@ class MultiVectorEmbedding:
 
     # Structural features
     structural_features: Dict[str, float] = field(default_factory=dict)
+    structural_embedding: Optional[np.ndarray] = None
+    structural_feature_names: List[str] = field(default_factory=list)
 
     # Combined representation
     combined_embedding: Optional[np.ndarray] = None
@@ -49,6 +51,8 @@ class MultiVectorEmbedding:
             "semantic_embedding": self.semantic_embedding.tolist() if self.semantic_embedding is not None else None,
             "keyword_embedding": self.keyword_embedding.tolist() if self.keyword_embedding is not None else None,
             "structural_features": self.structural_features,
+            "structural_embedding": self.structural_embedding.tolist() if self.structural_embedding is not None else None,
+            "structural_feature_names": self.structural_feature_names,
             "metadata": self.metadata
         }
 
@@ -252,7 +256,10 @@ class MultiVectorEmbedder:
 
         if structural_features and self.use_structural:
             # Convert structural features to vector
-            struct_vector = np.array(list(structural_features.values()))
+            struct_vector = np.array(
+                [structural_features[key] for key in sorted(structural_features.keys())],
+                dtype=float
+            )
             # Scale structural features by weight
             struct_vector = struct_vector * self.structural_weight
             vectors.append(struct_vector)
@@ -301,8 +308,16 @@ class MultiVectorEmbedder:
 
         # 3. Generate structural features
         structural_features = {}
+        structural_embedding = None
+        structural_feature_names: List[str] = []
         if self.use_structural:
             structural_features = self.generate_structural_features(text, metadata)
+            if structural_features:
+                structural_feature_names = sorted(structural_features.keys())
+                structural_embedding = np.array(
+                    [structural_features[name] for name in structural_feature_names],
+                    dtype=float
+                )
 
         # 4. Combine embeddings
         combined_emb = self.combine_embeddings(
@@ -315,6 +330,8 @@ class MultiVectorEmbedder:
             semantic_embedding=semantic_emb,
             keyword_embedding=keyword_emb,
             structural_features=structural_features,
+            structural_embedding=structural_embedding,
+            structural_feature_names=structural_feature_names,
             combined_embedding=combined_emb,
             metadata=metadata
         )
@@ -344,6 +361,34 @@ class MultiVectorEmbedder:
             embeddings.append(embedding)
 
         return embeddings
+
+    def embed_document(
+        self,
+        text: str,
+        doc_id: str,
+        metadata: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """
+        Backwards-compatible helper that returns numpy arrays for pipeline use.
+
+        Args:
+            text: Document or chunk text
+            doc_id: Identifier for the resulting embedding
+            metadata: Optional metadata carried through the pipeline
+
+        Returns:
+            Dictionary with semantic, keyword, structural, and combined embeddings
+        """
+        embedding = self.embed_chunk(text, doc_id, metadata)
+
+        return {
+            "semantic": embedding.semantic_embedding,
+            "keyword": embedding.keyword_embedding,
+            "structural": embedding.structural_embedding,
+            "combined": embedding.combined_embedding,
+            "metadata": embedding.metadata,
+            "structural_feature_names": embedding.structural_feature_names,
+        }
 
     def embed_query(
         self,

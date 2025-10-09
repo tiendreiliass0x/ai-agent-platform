@@ -10,9 +10,10 @@ import google.generativeai as genai
 from google.generativeai.types import HarmCategory, HarmBlockThreshold
 
 from ..core.config import settings
+from .llm_service_interface import LLMServiceInterface, LLMGenerationError, LLMEmbeddingError, LLMConnectionError
 
 
-class GeminiService:
+class GeminiService(LLMServiceInterface):
     """Service for interacting with Google Gemini 2.0 Flash"""
 
     def __init__(self):
@@ -44,7 +45,8 @@ class GeminiService:
         prompt: str,
         system_prompt: Optional[str] = None,
         temperature: float = 0.7,
-        max_tokens: int = 2048
+        max_tokens: int = 2048,
+        response_format: Optional[str] = None
     ) -> str:
         """
         Generate a text response using Gemini
@@ -54,6 +56,7 @@ class GeminiService:
             system_prompt: System instruction (prepended to prompt)
             temperature: Response creativity (0.0-1.0)
             max_tokens: Maximum response length
+            response_format: Optional format hint ("json" for JSON mode, None for text)
 
         Returns:
             Generated text response
@@ -147,12 +150,17 @@ class GeminiService:
         except Exception as e:
             yield f"Error: {str(e)}"
 
-    async def generate_embeddings(self, texts: List[str]) -> List[List[float]]:
+    async def generate_embeddings(
+        self,
+        texts: List[str],
+        task_type: str = "retrieval_document"
+    ) -> List[List[float]]:
         """
         Generate embeddings for a list of texts
 
         Args:
             texts: List of text strings to embed
+            task_type: Task type hint ("retrieval_document", "retrieval_query", "classification")
 
         Returns:
             List of embedding vectors
@@ -166,16 +174,14 @@ class GeminiService:
                     genai.embed_content,
                     model=self.embedding_model,
                     content=text,
-                    task_type="retrieval_document"
+                    task_type=task_type
                 )
                 embeddings.append(result['embedding'])
 
             return embeddings
 
         except Exception as e:
-            print(f"Error generating embeddings with Gemini: {e}")
-            # Return zero vectors as fallback
-            return [[0.0] * 768 for _ in texts]
+            raise LLMEmbeddingError(f"Error generating embeddings with Gemini: {e}") from e
 
     async def generate_query_embedding(self, query: str) -> List[float]:
         """
@@ -204,7 +210,8 @@ class GeminiService:
     async def analyze_content(
         self,
         content: str,
-        analysis_prompt: str
+        analysis_prompt: str,
+        temperature: float = 0.1
     ) -> Dict[str, Any]:
         """
         Analyze content using Gemini (for evaluation, classification, etc.)
@@ -212,6 +219,7 @@ class GeminiService:
         Args:
             content: Content to analyze
             analysis_prompt: Instructions for analysis
+            temperature: Sampling temperature (default 0.1 for deterministic analysis)
 
         Returns:
             Analysis results
@@ -221,7 +229,7 @@ class GeminiService:
 
             response = await self.generate_response(
                 prompt=full_prompt,
-                temperature=0.1  # Lower temperature for analysis
+                temperature=temperature
             )
 
             return {
@@ -284,6 +292,24 @@ class GeminiService:
                 "text_generation": "failed",
                 "embeddings": "failed"
             }
+
+    # Interface helper methods
+
+    def get_model_name(self) -> str:
+        """Get the name of the underlying model"""
+        return "gemini-2.0-flash-exp"
+
+    def get_embedding_dimensions(self) -> int:
+        """Get the dimensionality of embeddings"""
+        return 768  # Gemini text-embedding-004 produces 768-dim vectors
+
+    def supports_function_calling(self) -> bool:
+        """Check if this LLM service supports function calling"""
+        return True  # Gemini 2.0 supports function calling
+
+    def supports_json_mode(self) -> bool:
+        """Check if this LLM service supports guaranteed JSON output"""
+        return False  # Gemini doesn't have strict JSON mode, but can follow instructions
 
 
 # Create a global instance
