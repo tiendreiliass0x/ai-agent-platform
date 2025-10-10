@@ -418,7 +418,8 @@ async def upload_document(
             doc_metadata={
                 **document.doc_metadata,
                 "celery_task_id": task.id
-            }
+            },
+            celery_task_id=task.id,
         )
 
         logger.info(f"Document {document.id} queued for Celery processing (task_id={task.id})")

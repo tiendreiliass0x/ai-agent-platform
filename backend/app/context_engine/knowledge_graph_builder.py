@@ -384,6 +384,7 @@ class KnowledgeGraphBuilder:
                 existing.aliases = list(set(existing.aliases + [entity.name]))
             else:
                 entity_map[entity.id] = entity
+                entity.aliases = list(set(entity.aliases + [entity.name]))
                 entity.mentions = 1
 
         return list(entity_map.values())
@@ -415,6 +416,44 @@ class KnowledgeGraphBuilder:
             self.entity_index[entity.name.lower()].append(entity.id)
 
         self.relationships = all_relationships
+
+    def add_document(self, document_id: str, text: str) -> Dict[str, Any]:
+        """
+        Incrementally add a single document to the knowledge graph.
+
+        Args:
+            document_id: Identifier for the document (used in metadata only)
+            text: Document text
+
+        Returns:
+            Entities and relationships extracted from this document
+        """
+        if not text:
+            return {"entities": [], "relationships": []}
+
+        raw_entities = self.extract_entities(text)
+        deduped_entities = self._merge_entities(raw_entities)
+
+        # Register entities and update indices
+        new_entities = []
+        for entity in deduped_entities:
+            if entity.id in self.entities:
+                existing = self.entities[entity.id]
+                existing.mentions += entity.mentions
+                existing.aliases = list(set(existing.aliases + entity.aliases))
+            else:
+                self.entities[entity.id] = entity
+                new_entities.append(entity)
+
+            self.entity_index[entity.name.lower()].append(entity.id)
+
+        relationships = self.extract_relationships(text, deduped_entities)
+        self.relationships.extend(relationships)
+
+        return {
+            "entities": deduped_entities,
+            "relationships": relationships
+        }
 
     def query_subgraph(
         self,

@@ -59,6 +59,15 @@ def test_bm25_keyword_matching():
     print(f"\n✅ BM25 keyword matching works correctly")
 
 
+def test_bm25_corpus_limit():
+    """Ensure BM25 enforces maximum corpus size safety."""
+    bm25 = BM25()
+    bm25.max_corpus_size = 2
+
+    with pytest.raises(ValueError):
+        bm25.fit(["doc1", "doc2", "doc3"])
+
+
 def test_hybrid_retriever_sparse_only():
     """Test hybrid retriever with sparse (BM25) only"""
     corpus = [

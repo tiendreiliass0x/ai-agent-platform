@@ -24,6 +24,7 @@ class Document(Base):
 
     # Metadata
     doc_metadata = Column(JSON, default={})
+    celery_task_id = Column(String(36), nullable=True, unique=True, index=True)
 
     # Agent relationship
     agent_id = Column(Integer, ForeignKey("agents.id"), nullable=False)

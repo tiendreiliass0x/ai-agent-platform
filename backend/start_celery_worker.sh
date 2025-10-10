@@ -14,6 +14,16 @@ echo -e "${BLUE}========================================${NC}"
 echo -e "${BLUE}Starting Celery Workers for AI Agent Platform${NC}"
 echo -e "${BLUE}========================================${NC}"
 
+# macOS + PyTorch (MPS) can crash under forked pools. Disable fork safety or
+# switch to solo pool when running locally on Darwin for stability.
+if [[ "$OSTYPE" == "darwin"* ]]; then
+    export OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES
+    export PYTORCH_ENABLE_MPS_FALLBACK=1
+    CELERY_WORKER_POOL="${CELERY_WORKER_POOL:-solo}"
+else
+    CELERY_WORKER_POOL="${CELERY_WORKER_POOL:-prefork}"
+fi
+
 # Configuration
 APP_NAME="app.celery_app"
 LOG_LEVEL="${CELERY_LOG_LEVEL:-info}"
@@ -62,6 +72,7 @@ start_worker() {
     celery -A $APP_NAME worker \
         --queues=$queue \
         --concurrency=$concurrency \
+        --pool=$CELERY_WORKER_POOL \
         --loglevel=$LOG_LEVEL \
         --hostname=${worker_name}@%h \
         --max-tasks-per-child=1000 \

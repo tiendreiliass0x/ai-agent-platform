@@ -284,6 +284,7 @@ class SemanticChunker:
     ) -> List[SemanticChunk]:
         """Create chunks from identified boundaries"""
         chunks = []
+        document_length = len(text)
 
         for i in range(len(boundaries) - 1):
             start_idx = boundaries[i]
@@ -318,6 +319,17 @@ class SemanticChunker:
                 level=level
             )
 
+            # Enrich metadata for downstream structural features
+            chunk.metadata.update({
+                "level": level,
+                "topic": topic,
+                "start_pos": start_pos,
+                "end_pos": end_pos,
+                "position": (start_pos + end_pos) / (2 * max(document_length, 1)),
+                "token_count": len(chunk_text.split()),
+                "document_length": document_length,
+            })
+
             chunks.append(chunk)
 
         return chunks
@@ -351,6 +363,16 @@ class SemanticChunker:
                         topic=chunk.topic or next_chunk.topic,
                         level=min(chunk.level, next_chunk.level)
                     )
+                    doc_length = chunk.metadata.get("document_length") or next_chunk.metadata.get("document_length") or len(merged_text)
+                    merged_chunk.metadata.update({
+                        "level": merged_chunk.level,
+                        "topic": merged_chunk.topic,
+                        "start_pos": merged_chunk.start_pos,
+                        "end_pos": merged_chunk.end_pos,
+                        "position": (merged_chunk.start_pos + merged_chunk.end_pos) / (2 * max(doc_length, 1)),
+                        "token_count": len(merged_text.split()),
+                        "document_length": doc_length,
+                    })
                     processed.append(merged_chunk)
                     i += 2  # Skip both merged chunks
                     continue
@@ -380,6 +402,16 @@ class SemanticChunker:
                 topic=chunk.topic,
                 level=chunk.level
             )
+            doc_length = chunk.metadata.get("document_length") or len(chunk.text)
+            sub_chunk.metadata.update({
+                "level": sub_chunk.level,
+                "topic": sub_chunk.topic,
+                "start_pos": sub_chunk.start_pos,
+                "end_pos": sub_chunk.end_pos,
+                "position": (sub_chunk.start_pos + sub_chunk.end_pos) / (2 * max(doc_length, 1)),
+                "token_count": len(sub_text.split()),
+                "document_length": doc_length,
+            })
             sub_chunks.append(sub_chunk)
 
         return sub_chunks

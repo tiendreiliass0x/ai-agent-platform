@@ -10,6 +10,7 @@ from .customer_profile import CustomerProfile
 from .customer_memory import CustomerMemory, MemoryType, MemoryImportance
 from .escalation import Escalation
 from .persona import Persona, KnowledgePack, KnowledgePackSource
+from .tool_registry import Tool, ToolManifest, ToolOperation
 
 __all__ = [
     "Base",
@@ -31,4 +32,7 @@ __all__ = [
     "Persona",
     "KnowledgePack",
     "KnowledgePackSource",
+    "Tool",
+    "ToolManifest",
+    "ToolOperation",
 ]

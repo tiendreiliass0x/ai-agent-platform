@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Dict, Optional
 
 from celery.result import AsyncResult
 from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.exc import SQLAlchemyError
 from pydantic import BaseModel
 
 from ...celery_app import celery_app
@@ -16,6 +18,10 @@ from ...services.database_service import db_service
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+CELERY_TASK_ID_PATTERN = re.compile(
+    r"^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$"
+)
 
 
 class TaskStatusResponse(BaseModel):
@@ -38,6 +44,12 @@ async def _get_authorized_task_document(
     current_user: SimpleUser,
 ) -> Any:
     """Return the document linked to the task after access validation."""
+
+    if not CELERY_TASK_ID_PATTERN.match(task_id):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid task ID format",
+        )
 
     document = await db_service.get_document_by_task_id(task_id)
     if not document:
@@ -153,7 +165,7 @@ async def get_task_status(
 
     except HTTPException:
         raise
-    except Exception as exc:  # noqa: BLE001
+    except SQLAlchemyError as exc:
         logger.error(
             "Error retrieving task status",
             extra={"task_id": task_id, "document_id": document.id, "error": str(exc)},
@@ -163,6 +175,13 @@ async def get_task_status(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to retrieve task status",
         )
+    except Exception as exc:  # noqa: BLE001
+        logger.critical(
+            "Unexpected error retrieving task status",
+            extra={"task_id": task_id, "document_id": document.id, "error": str(exc)},
+            exc_info=True,
+        )
+        raise
 
 
 @router.delete("/{task_id}")
@@ -193,11 +212,13 @@ async def cancel_task(
             },
         )
 
-        await db_service.update_document(
-            document.id,
-            status="cancelled",
-            error_message="Task cancelled by user",
-        )
+        terminal_states = {"cancelled", "failed", "completed"}
+        if getattr(document, "status", None) not in terminal_states:
+            await db_service.update_document(
+                document.id,
+                status="cancelled",
+                error_message="Task cancelled by user",
+            )
 
         return {
             "task_id": task_id,
@@ -207,7 +228,7 @@ async def cancel_task(
 
     except HTTPException:
         raise
-    except Exception as exc:  # noqa: BLE001
+    except SQLAlchemyError as exc:
         logger.error(
             "Error cancelling task",
             extra={"task_id": task_id, "document_id": document.id, "error": str(exc)},
@@ -217,3 +238,10 @@ async def cancel_task(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to cancel task",
         )
+    except Exception as exc:  # noqa: BLE001
+        logger.critical(
+            "Unexpected error cancelling task",
+            extra={"task_id": task_id, "document_id": document.id, "error": str(exc)},
+            exc_info=True,
+        )
+        raise

@@ -62,7 +62,7 @@ celery_app.conf.beat_schedule = {
 }
 
 # Import tasks explicitly to ensure they're registered
-from app.tasks import document_tasks, crawl_tasks  # noqa
+from app.tasks import document_tasks, crawl_tasks, context_engine_tasks  # noqa
 
 # Discover tasks in app.tasks package
 celery_app.autodiscover_tasks(["app.tasks"])  # type: ignore

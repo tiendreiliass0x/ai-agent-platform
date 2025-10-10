@@ -11,13 +11,45 @@ from app.services.personality_service import personality_service
 from app.services.context.context_compression import compress_context_snippet
 from app.services.reranker_service import reranker_service
 
+# Phase 2 Context Engine Components
+from app.context_engine.query_understanding import QueryUnderstandingEngine
+from app.context_engine.conversation_memory import ConversationMemory
+from app.context_engine.conversation_store import ConversationMemoryStore
+from app.context_engine.confidence_scorer import ConfidenceScorer
+from app.context_engine.contradiction_detector import ContradictionDetector, Statement
+from app.context_engine.answer_synthesizer import AnswerSynthesizer
+
 class RAGService:
-    def __init__(self):
+    def __init__(self, enable_phase2: bool = True):
+        """
+        Initialize RAG Service with optional Phase 2 enhancements.
+
+        Args:
+            enable_phase2: Enable Phase 2 Context Engine components
+                          (Query Understanding, Conversation Memory, etc.)
+        """
         self.document_processor = DocumentProcessor()
         self.embedding_service = EmbeddingService()
         self.openai_client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY) if settings.OPENAI_API_KEY else None
         self.gemini_service = gemini_service  # Use Gemini as primary LLM
         self.reranker = reranker_service
+
+        # Phase 2 Components (optional)
+        self.enable_phase2 = enable_phase2
+        if enable_phase2:
+            self.query_understanding = QueryUnderstandingEngine(
+                use_llm=True,
+                llm_service=gemini_service
+            )
+            self.confidence_scorer = ConfidenceScorer(
+                embedder=self.embedding_service
+            )
+            self.contradiction_detector = ContradictionDetector()
+            self.answer_synthesizer = AnswerSynthesizer(
+                llm_service=gemini_service,
+                use_llm=True
+            )
+            self.conversation_store = ConversationMemoryStore()
 
     async def generate_response(
         self,
@@ -26,10 +58,45 @@ class RAGService:
         conversation_history: List[Dict[str, str]] = None,
         system_prompt: str = None,
         agent_config: Dict[str, Any] = None,
-        db_session = None
+        db_session = None,
+        session_id: Optional[str] = None
     ) -> Dict[str, Any]:
-        """Generate a response using RAG (Retrieval-Augmented Generation)"""
+        """
+        Generate a response using RAG (Retrieval-Augmented Generation).
 
+        If Phase 2 is enabled, uses enhanced intelligence components:
+        - Query Understanding for intent detection
+        - Conversation Memory for context tracking
+        - Confidence Scoring for answer reliability
+        - Contradiction Detection for source conflicts
+        - Answer Synthesis for multi-source fusion
+
+        Args:
+            query: User's question
+            agent_id: Agent ID for knowledge base
+            conversation_history: Previous conversation turns
+            system_prompt: Base system prompt
+            agent_config: Agent configuration
+            db_session: Database session
+            session_id: Session ID for conversation tracking (Phase 2)
+
+        Returns:
+            Response dictionary with answer, sources, confidence, etc.
+        """
+
+        # Route to Phase 2 enhanced pipeline if enabled
+        if self.enable_phase2 and session_id:
+            return await self._generate_response_phase2(
+                query=query,
+                agent_id=agent_id,
+                session_id=session_id,
+                conversation_history=conversation_history,
+                system_prompt=system_prompt,
+                agent_config=agent_config,
+                db_session=db_session
+            )
+
+        # Otherwise use original pipeline
         try:
             # Step 1: Retrieve relevant context (increased from 5 to 20 for better recall)
             context_results = await self.document_processor.search_similar_content(
@@ -102,6 +169,209 @@ class RAGService:
                 "context_used": 0,
                 "error": str(e)
             }
+
+    async def _generate_response_phase2(
+        self,
+        query: str,
+        agent_id: int,
+        session_id: str,
+        conversation_history: Optional[List[Dict[str, str]]] = None,
+        system_prompt: Optional[str] = None,
+        agent_config: Optional[Dict[str, Any]] = None,
+        db_session = None
+    ) -> Dict[str, Any]:
+        """
+        Enhanced RAG pipeline with Phase 2 Context Engine components.
+
+        Pipeline:
+        1. Load/create conversation memory from DB
+        2. Analyze query with LLM (intent, entities, complexity)
+        3. Retrieve context with query expansions
+        4. Detect contradictions in sources
+        5. Score answer confidence
+        6. Synthesize answer with LLM (multi-source fusion)
+        7. Persist conversation turn to DB
+        """
+        try:
+            # Step 1: Load or create conversation memory
+            conversation_id = await self.conversation_store.get_or_create_conversation(
+                session_id=session_id,
+                agent_id=agent_id
+            )
+
+            conversation_memory = await ConversationMemory.from_store(
+                store=self.conversation_store,
+                conversation_id=conversation_id,
+                llm_service=self.gemini_service
+            )
+
+            # Step 2: Understand the query with LLM
+            history_content = [turn.content for turn in conversation_memory.get_recent_context(window=6)]
+            query_analysis = await self.query_understanding.analyze_async(
+                query=query,
+                conversation_history=history_content
+            )
+
+            # Step 3: Retrieve context (with query expansions)
+            # Use original query + expansion terms for broader recall
+            search_queries = [query] + query_analysis.expansion_terms[:3]
+
+            all_contexts = []
+            for search_query in search_queries:
+                contexts = await self.document_processor.search_similar_content(
+                    query=search_query,
+                    agent_id=agent_id,
+                    top_k=10
+                )
+                all_contexts.extend(contexts or [])
+
+            # Deduplicate by chunk_id
+            seen_chunks = set()
+            unique_contexts = []
+            for ctx in all_contexts:
+                chunk_id = ctx.get("metadata", {}).get("chunk_id")
+                if chunk_id and chunk_id not in seen_chunks:
+                    unique_contexts.append(ctx)
+                    seen_chunks.add(chunk_id)
+                elif not chunk_id:
+                    unique_contexts.append(ctx)
+
+            # Rerank to get top 5
+            context_results = await self.reranker.rerank(
+                query,
+                unique_contexts,
+                top_k=5
+            )
+
+            # Step 4: Detect contradictions
+            statements = [
+                Statement(
+                    text=ctx.get("text", ""),
+                    source_id=ctx.get("metadata", {}).get("source_id", "unknown"),
+                    authority=ctx.get("metadata", {}).get("authority", 0.5),
+                    timestamp=None
+                )
+                for ctx in context_results
+            ]
+
+            contradictions = self.contradiction_detector.detect_conflicts(statements)
+
+            # Step 5: Score confidence
+            confidence_result = self.confidence_scorer.score(
+                query=query,
+                retrieved_contexts=[ctx.get("text", "") for ctx in context_results],
+                context_metadata=[ctx.get("metadata", {}) for ctx in context_results]
+            )
+
+            # Step 6: Synthesize answer with LLM
+            synthesized = await self.answer_synthesizer.synthesize_async(
+                question=query,
+                contexts=context_results,
+                confidence=confidence_result.overall,
+                contradictions=contradictions
+            )
+
+            # Step 7: Persist conversation turn
+            await conversation_memory.add_turn_async(
+                role="user",
+                content=query,
+                metadata={
+                    "intents": ",".join(query_analysis.intents),
+                    "entities": ",".join(query_analysis.entities),
+                    "complexity": query_analysis.complexity
+                }
+            )
+
+            await conversation_memory.add_turn_async(
+                role="assistant",
+                content=synthesized.summary,
+                metadata={
+                    "confidence": str(confidence_result.overall),
+                    "sources_used": str(len(context_results)),
+                    "contradictions_found": str(len(contradictions))
+                }
+            )
+
+            # Build response
+            return {
+                "response": synthesized.summary,
+                "sources": self._extract_sources(context_results),
+                "context_used": len(context_results),
+                "confidence": confidence_result.overall,
+                "confidence_breakdown": {
+                    "coverage": confidence_result.coverage,
+                    "agreement": confidence_result.agreement,
+                    "authority": confidence_result.authority
+                },
+                "query_analysis": {
+                    "question_type": query_analysis.question_type,
+                    "intents": query_analysis.intents,
+                    "entities": query_analysis.entities,
+                    "complexity": query_analysis.complexity
+                },
+                "contradictions": [
+                    {
+                        "severity": c.severity,
+                        "description": c.description
+                    }
+                    for c in contradictions
+                ],
+                "uncertainty_notes": synthesized.uncertainty_notes,
+                "phase2_enabled": True,
+                "model_used": "gemini-2.0-flash-exp (Phase 2)"
+            }
+
+        except Exception as e:
+            print(f"Error in Phase 2 pipeline: {e}")
+            # Fallback to original pipeline
+            return await self._generate_response_fallback(
+                query=query,
+                agent_id=agent_id,
+                conversation_history=conversation_history,
+                system_prompt=system_prompt,
+                agent_config=agent_config,
+                db_session=db_session,
+                error=str(e)
+            )
+
+    async def _generate_response_fallback(
+        self,
+        query: str,
+        agent_id: int,
+        conversation_history: Optional[List[Dict[str, str]]],
+        system_prompt: Optional[str],
+        agent_config: Optional[Dict[str, Any]],
+        db_session,
+        error: str
+    ) -> Dict[str, Any]:
+        """Fallback to original pipeline if Phase 2 fails"""
+        print(f"Using fallback pipeline due to Phase 2 error: {error}")
+
+        # Use original retrieve + generate logic
+        context_results = await self.document_processor.search_similar_content(
+            query=query,
+            agent_id=agent_id,
+            top_k=5
+        )
+
+        context_text = self._format_context(context_results)
+        messages = self._build_messages(
+            query=query,
+            context=context_text,
+            conversation_history=conversation_history or [],
+            system_prompt=system_prompt or "You are a helpful assistant."
+        )
+
+        response = await self._generate_llm_response(messages, agent_config or {})
+
+        return {
+            "response": response["content"],
+            "sources": self._extract_sources(context_results),
+            "context_used": len(context_results),
+            "model_used": response.get("model", "unknown"),
+            "phase2_enabled": False,
+            "fallback_reason": error
+        }
 
     async def retrieve_context(
         self,
