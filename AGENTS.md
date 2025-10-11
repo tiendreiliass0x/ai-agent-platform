@@ -1,3 +1,30 @@
+# AI Agent Platform - Developer Guidelines
+
+> **Think Jarvis, not Zapier** - An AI agent/copilot that works alongside humans, not replacing them.
+
+## Product Vision
+
+This is a **conversational AI agent you work WITH**, not an automation tool that replaces you. It's your intelligent assistant that:
+
+- 🗣️ **Understands natural language requests** in your work context
+- 🌐 **Horizontal by design** - one agent, many roles (support, sales, executive assistant, etc.)
+- 🧠 **Maintains conversation and task context** across interactions
+- 🔗 **Accesses and synthesize information** from multiple sources
+- ⚡ **Takes multi-step actions ON YOUR BEHALF** when you ask, not automatically
+
+### Why This Matters for Development
+
+When building features, remember:
+- **Conversational first**: Design for natural language interaction, not forms/buttons
+- **Context-aware**: Agent knows user's role, company, and current task
+- **Action-oriented**: Users direct the agent to take actions, agent doesn't auto-trigger
+- **Horizontal**: Same agent handles support tickets, CRM updates, research - adapt by context
+
+Traditional tools: "If X happens, do Y automatically"
+This agent: "User asks in natural language, agent takes action on their behalf"
+
+---
+
 # Repository Guidelines
 
 ## Project Structure

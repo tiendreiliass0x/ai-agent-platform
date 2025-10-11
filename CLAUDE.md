@@ -2,9 +2,34 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Product Vision
+
+> **Think Jarvis, not Zapier** - An AI agent/copilot that works WITH humans, not replacing them.
+
+This is a **conversational AI agent you work WITH**, not an automation tool. It's your intelligent assistant that:
+
+- 🗣️ **Understands natural language requests** in your work context
+- 🌐 **Horizontal by design** - one agent, many roles (support rep, sales rep, executive assistant, etc.)
+- 🧠 **Maintains conversation and task context** across interactions
+- 🔗 **Accesses and synthesizes information** from multiple sources
+- ⚡ **Takes multi-step actions ON YOUR BEHALF** when you ask, not automatically
+
+### Core Capabilities
+
+The agent can:
+1. **Understand natural language requests** in work context
+2. **Navigate any system** (via tool integrations and adapters)
+3. **Maintain conversation and task context** (persistent memory)
+4. **Access and synthesize information** from multiple sources (RAG + knowledge graph)
+5. **Take multi-step actions when directed** (agentic workflows with policy enforcement)
+
+Traditional automation replaces humans with repetitive task execution. This agent **augments humans** by being a smart assistant that helps you do your work better.
+
+---
+
 ## Project Overview
 
-An AI agent platform for creating intelligent chatbot concierges that companies can embed on their websites. The platform uses RAG (Retrieval-Augmented Generation) to provide context-aware responses based on uploaded documents, websites, and knowledge bases.
+An AI agent platform for creating intelligent agents that companies can embed on their websites or use internally. The platform combines RAG (Retrieval-Augmented Generation), agentic workflows, and tool execution to provide context-aware assistance across any role or department.
 
 ## Development Commands
 

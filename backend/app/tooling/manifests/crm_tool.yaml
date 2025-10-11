@@ -1,0 +1,171 @@
+tool:
+  name: crm
+  version: 1.0.0
+  display_name: "CRM System"
+  description: "Customer relationship management operations for leads, contacts, and tickets"
+  base_url: "https://api.example-crm.com"
+
+  auth:
+    kind: api_key
+    header: "X-API-Key"
+
+  governance:
+    pii: may_contain
+    data_retention: "90_days"
+    audit_required: true
+
+  rate_limits:
+    requests_per_minute: 60
+    requests_per_day: 1000
+
+  operations:
+    - op_id: crm.create_lead
+      method: POST
+      path: /v1/leads
+      side_effect: write
+      description: "Create a new lead in CRM system"
+      args_schema:
+        type: object
+        required:
+          - first_name
+          - last_name
+          - company
+        properties:
+          first_name:
+            type: string
+            description: "Lead's first name"
+          last_name:
+            type: string
+            description: "Lead's last name"
+          company:
+            type: string
+            description: "Company name"
+          email:
+            type: string
+            format: email
+            description: "Lead's email address"
+          phone:
+            type: string
+            description: "Lead's phone number"
+          status:
+            type: string
+            enum: ["new", "contacted", "qualified"]
+            default: "new"
+      returns:
+        type: object
+        properties:
+          id:
+            type: string
+            description: "Lead ID"
+          email:
+            type: string
+          status:
+            type: string
+          created_at:
+            type: string
+            format: date-time
+      preconditions:
+        - "args.email matches email format"
+        - "args.company is not empty"
+      postconditions:
+        - "result.id is not empty"
+        - "result.status equals 'new'"
+      requires_approval: false
+      compensation:
+        operation: crm.delete_lead
+        args_mapping:
+          lead_id: result.id
+      errors:
+        - code: 400
+          message: "Invalid input data"
+          retry: "none"
+        - code: 429
+          message: "Rate limit exceeded"
+          retry: "exponential_backoff"
+        - code: 500
+          message: "Internal server error"
+          retry: "exponential_backoff"
+
+    - op_id: crm.create_ticket
+      method: POST
+      path: /v1/tickets
+      side_effect: write
+      description: "Create a support ticket in CRM"
+      args_schema:
+        type: object
+        required:
+          - order_id
+          - issue_type
+        properties:
+          order_id:
+            type: string
+            description: "Order number"
+          issue_type:
+            type: string
+            enum: ["wrong_size", "damaged", "missing", "other"]
+            description: "Type of issue"
+          description:
+            type: string
+            description: "Detailed description"
+          priority:
+            type: string
+            enum: ["low", "medium", "high", "critical"]
+            default: "medium"
+      returns:
+        type: object
+        properties:
+          ticket_id:
+            type: string
+          status:
+            type: string
+          created_at:
+            type: string
+      requires_approval: false
+      compensation:
+        operation: crm.delete_ticket
+        args_mapping:
+          ticket_id: result.ticket_id
+
+    - op_id: crm.update_ticket
+      method: PATCH
+      path: /v1/tickets/{ticket_id}
+      side_effect: write
+      description: "Update existing support ticket"
+      args_schema:
+        type: object
+        required:
+          - ticket_id
+        properties:
+          ticket_id:
+            type: string
+          status:
+            type: string
+            enum: ["open", "in_progress", "resolved", "closed"]
+          notes:
+            type: string
+      requires_approval: false
+
+    - op_id: crm.get_customer
+      method: GET
+      path: /v1/customers/{customer_id}
+      side_effect: read
+      description: "Retrieve customer information"
+      args_schema:
+        type: object
+        required:
+          - customer_id
+        properties:
+          customer_id:
+            type: string
+      returns:
+        type: object
+        properties:
+          id:
+            type: string
+          name:
+            type: string
+          email:
+            type: string
+          tier:
+            type: string
+      requires_approval: false

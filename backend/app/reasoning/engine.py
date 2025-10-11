@@ -32,14 +32,27 @@ class ReasoningEngine:
         context,
         cache_context,
         conversation_memory,
+        *,
+        feedback=None,
+        previous_plan=None,
+        error=None,
+        shared_state=None,
     ) -> Plan:
         if strategy_name not in self._reasoners:
             raise PlanValidationError(f"No reasoner registered for strategy '{strategy_name}'")
 
         reasoner = self._reasoners[strategy_name]
+        augmented_context = cache_context
+        if feedback:
+            base_context = cache_context or ""
+            augmented_context = f"{base_context}\n\n[Retry Feedback]\n{feedback}"
         return await reasoner.generate_plan(
             task=task,
             context=context,
-            cache_context=cache_context,
+            cache_context=augmented_context,
             conversation_memory=conversation_memory,
+            feedback=feedback,
+            previous_plan=previous_plan,
+            error=error,
+            shared_state=shared_state,
         )

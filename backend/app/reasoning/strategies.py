@@ -77,9 +77,21 @@ class ReactReasoner(BaseReasoner):
                 )
             )
 
-        return Plan(
+        plan = Plan(
             goal=data.get("goal", ""),
             strategy="react",
             steps=steps,
             parallel_groups=data.get("parallel_groups", []),
         )
+        if not plan.steps:
+            raise PlanValidationError("ReAct produced empty plan")
+        return plan
+
+
+class ReflexionReasoner(BaseReasoner):
+    def __init__(self, base_reasoner: PlanExecuteReasoner):
+        self.base_reasoner = base_reasoner
+
+    async def generate_plan(self, **kwargs) -> Plan:
+        plan = await self.base_reasoner.generate_plan(**kwargs)
+        return plan

@@ -1,6 +1,33 @@
 # AI Agent Platform
 
-A platform for creating True AI agents that can handle users request, computer use by ingest all sort of documents
+> **Think Jarvis, not Zapier** - An AI agent/copilot that works alongside humans, not replacing them.
+
+## 🎯 What This Is
+
+This is a **conversational AI agent you work WITH**, not an automation tool that replaces you. It's your intelligent assistant that:
+
+- 🗣️ **Understands natural language requests** in your work context
+- 🌐 **Horizontal by design** - one agent, many roles (support, sales, executive assistant, etc.)
+- 🧠 **Maintains conversation and task context** across interactions
+- 🔗 **Accesses and synthesizes information** from multiple sources
+- ⚡ **Takes multi-step actions ON YOUR BEHALF** when you ask, not automatically
+
+### The Key Difference
+
+Traditional automation tools do **repetitive tasks automatically**. This agent is a **smart assistant that helps you do your work better**.
+
+The same capabilities that help a:
+- **Support rep** (reading tickets, pulling docs, drafting responses)
+- **Sales rep** (researching prospects, updating CRM, drafting emails)
+- **Executive assistant** (scheduling, email management, research)
+
+Because it's **horizontal, not vertical** - understanding YOUR context (role, company, current task) and navigating any system on your behalf.
+
+---
+
+## Platform Overview
+
+A platform for creating intelligent AI agents with advanced RAG, agentic workflows, and tool execution capabilities.
 
 ## 🚀 Quick Start
 

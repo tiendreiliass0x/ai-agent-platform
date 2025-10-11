@@ -41,9 +41,7 @@ class RAGService:
                 use_llm=True,
                 llm_service=gemini_service
             )
-            self.confidence_scorer = ConfidenceScorer(
-                embedder=self.embedding_service
-            )
+            self.confidence_scorer = ConfidenceScorer()
             self.contradiction_detector = ContradictionDetector()
             self.answer_synthesizer = AnswerSynthesizer(
                 llm_service=gemini_service,

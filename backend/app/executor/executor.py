@@ -27,6 +27,7 @@ class Executor:
         circuit_breaker,
         tool_registry,
         saga_manager: SagaManager | None = None,
+        adapter_registry=None,
     ) -> None:
         self.http = http_client
         self.secrets = secret_store
@@ -36,6 +37,7 @@ class Executor:
         self.registry = tool_registry
         self.saga_manager = saga_manager or SagaManager()
         self.verifier = verifier
+        self.adapter_registry = adapter_registry
 
     async def execute(self, step: Any, user: Any, context: Dict[str, Any]) -> Dict[str, Any]:
         if step.kind != "tool":
@@ -57,12 +59,22 @@ class Executor:
         except VerifierError as exc:
             raise PreconditionError(str(exc)) from exc
 
-        headers = await self._build_headers(user, manifest, operation, step.args)
+        adapter_response = await self._maybe_execute_with_adapter(
+            manifest=manifest,
+            operation=operation,
+            args=step.args,
+            user=user,
+            shared_state=context,
+        )
+        if adapter_response is not None:
+            response = adapter_response
+        else:
+            headers = await self._build_headers(user, manifest, operation, step.args)
 
-        async def invoke():
-            return await self._execute_with_retries(manifest, operation, step.args, headers)
+            async def invoke():
+                return await self._execute_with_retries(manifest, operation, step.args, headers)
 
-        response = await self.circuit_breaker.call(manifest.name, invoke)
+            response = await self.circuit_breaker.call(manifest.name, invoke)
         try:
             self.verifier.verify_postconditions(operation, step.args, response)
         except VerifierError as exc:
@@ -173,3 +185,30 @@ class Executor:
 
     async def rollback(self, executor_callable) -> None:
         await self.saga_manager.rollback(executor_callable)
+
+    async def _maybe_execute_with_adapter(
+        self,
+        manifest: ToolManifest,
+        operation: OperationSpec,
+        args: Dict[str, Any],
+        user: Any,
+        shared_state: Dict[str, Any],
+    ) -> Dict[str, Any] | None:
+        if not self.adapter_registry:
+            return None
+
+        metadata = shared_state.get("_agent_metadata", {}) if isinstance(shared_state, dict) else {}
+        adapter = self.adapter_registry.get_adapter(manifest.name, metadata)
+        if adapter is None:
+            return None
+
+        from app.tooling.adapters.base import ToolExecutionContext
+
+        execution_context = ToolExecutionContext(
+            user=user,
+            shared_state=shared_state,
+            agent_metadata=metadata,
+            secret_store=self.secrets,
+            http_client=self.http,
+        )
+        return await adapter.execute(manifest, operation, args, execution_context)

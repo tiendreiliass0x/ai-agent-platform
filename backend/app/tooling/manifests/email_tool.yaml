@@ -1,0 +1,132 @@
+tool:
+  name: email
+  version: 1.0.0
+  display_name: "Email Service"
+  description: "Send transactional and marketing emails via SendGrid"
+  base_url: "https://api.sendgrid.com"
+
+  auth:
+    kind: api_key
+    header: "Authorization"
+    prefix: "Bearer"
+
+  governance:
+    pii: contains
+    data_retention: "30_days"
+    audit_required: true
+
+  rate_limits:
+    requests_per_minute: 100
+    requests_per_day: 10000
+
+  operations:
+    - op_id: email.send_transactional
+      method: POST
+      path: /v3/mail/send
+      side_effect: write
+      description: "Send transactional email using template"
+      args_schema:
+        type: object
+        required:
+          - to_email
+          - template_id
+        properties:
+          to_email:
+            type: string
+            format: email
+            description: "Recipient email address"
+          template_id:
+            type: string
+            description: "SendGrid template ID"
+          variables:
+            type: object
+            description: "Template variables"
+            additionalProperties: true
+          from_email:
+            type: string
+            format: email
+            default: "noreply@example.com"
+          from_name:
+            type: string
+            default: "Support Team"
+      returns:
+        type: object
+        properties:
+          message_id:
+            type: string
+            description: "Unique message ID"
+          status:
+            type: string
+            enum: ["sent", "queued"]
+          sent_at:
+            type: string
+            format: date-time
+      preconditions:
+        - "args.to_email matches email format"
+        - "args.template_id is not empty"
+      postconditions:
+        - "result.status in ['sent', 'queued']"
+        - "result.message_id is not empty"
+      requires_approval: false
+      idempotency:
+        header: "Idempotency-Key"
+        ttl_seconds: 86400
+      errors:
+        - code: 400
+          message: "Invalid email or template"
+          retry: "none"
+        - code: 429
+          message: "Rate limit exceeded"
+          retry: "exponential_backoff"
+        - code: 500
+          message: "SendGrid error"
+          retry: "exponential_backoff"
+
+    - op_id: email.send_bulk
+      method: POST
+      path: /v3/mail/send
+      side_effect: write
+      description: "Send bulk emails to multiple recipients"
+      args_schema:
+        type: object
+        required:
+          - recipients
+          - template_id
+        properties:
+          recipients:
+            type: array
+            items:
+              type: string
+              format: email
+            maxItems: 100
+          template_id:
+            type: string
+          variables:
+            type: object
+      requires_approval: true  # Bulk emails require approval
+      preconditions:
+        - "len(args.recipients) <= 100"
+
+    - op_id: email.get_status
+      method: GET
+      path: /v3/messages/{message_id}
+      side_effect: read
+      description: "Check email delivery status"
+      args_schema:
+        type: object
+        required:
+          - message_id
+        properties:
+          message_id:
+            type: string
+      returns:
+        type: object
+        properties:
+          message_id:
+            type: string
+          status:
+            type: string
+            enum: ["sent", "delivered", "opened", "clicked", "bounced", "failed"]
+          events:
+            type: array
+      requires_approval: false

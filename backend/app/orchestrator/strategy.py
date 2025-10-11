@@ -5,7 +5,7 @@ from typing import Literal
 
 from .models import AgentTask, AgentContext
 
-StrategyName = Literal["plan_execute", "react"]
+StrategyName = Literal["plan_execute", "react", "reflexion"]
 
 
 @dataclass
@@ -19,4 +19,6 @@ class StrategySelector:
         description = task.description.lower()
         if any(word in description for word in ["investigate", "diagnose", "why"]):
             return StrategyDecision(name="react", reasoning="Exploratory task detected")
+        if any(word in description for word in ["retry", "error", "stuck", "fix"]):
+            return StrategyDecision(name="reflexion", reasoning="Task involves error recovery")
         return StrategyDecision(name="plan_execute", reasoning="Deterministic workflow")

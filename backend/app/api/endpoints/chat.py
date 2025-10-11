@@ -24,6 +24,7 @@ from app.services.domain_expertise_service import domain_expertise_service
 from app.services.intelligent_fallback_service import intelligent_fallback_service
 from app.services.rag_service import RAGService
 from app.services.database_service import db_service
+from app.services.query_router import get_query_router
 
 router = APIRouter()
 
@@ -223,8 +224,11 @@ async def chat_with_agent(
         analysis = session_details.get("analysis")
         insights_payload = analysis or {}
 
+        # Check if intelligent routing is enabled (via agent config)
+        use_intelligent_routing = agent.config.get("enable_intelligent_routing", False) if agent.config else False
+
         # Use domain expertise service if enabled
-        if agent.domain_expertise_enabled:
+        if agent.domain_expertise_enabled and not use_intelligent_routing:
             domain_response = await domain_expertise_service.answer_with_domain_expertise(
                 message=chat_data.message,
                 agent=agent,
@@ -253,7 +257,110 @@ async def chat_with_agent(
                 }
             )
 
-        else:
+        elif use_intelligent_routing:
+            # NEW: Use intelligent query router (RAG + Agentic)
+            try:
+                # Get orchestrator if agentic routing enabled
+                orchestrator = None
+                enable_agentic = agent.config.get("enable_agentic_tools", False) if agent.config else False
+
+                if enable_agentic:
+                    from app.services.orchestrator_builder import get_agent_orchestrator
+                    orchestrator = get_agent_orchestrator()
+
+                # Get query router
+                query_router = get_query_router(
+                    orchestrator=orchestrator,
+                    enable_agentic=enable_agentic
+                )
+
+                # Prepare context for routing
+                routing_context = {
+                    "session_id": chat_data.session_context.get("session_id"),
+                    "conversation_id": chat_data.conversation_id,
+                    "visitor_id": visitor_id,
+                    "customer_profile_id": customer_profile_id,
+                    **chat_data.session_context
+                }
+
+                # Prepare system prompt
+                fallback_strategy = intelligent_fallback_service.determine_fallback_strategy(
+                    customer_context=customer_context,
+                    product_context=product_context,
+                    user_message=chat_data.message
+                )
+
+                fallback_response = intelligent_fallback_service.apply_fallback_strategy(
+                    strategy=fallback_strategy,
+                    customer_context=customer_context,
+                    product_context=product_context,
+                    user_message=chat_data.message,
+                    base_response=""
+                )
+
+                enhanced_system_prompt = intelligent_fallback_service.create_context_enriched_prompt(
+                    base_system_prompt=agent.system_prompt or "You are a helpful assistant.",
+                    customer_context=customer_context,
+                    product_context=product_context,
+                    fallback_response=fallback_response
+                )
+
+                # Route query
+                routed_response = await query_router.route(
+                    message=chat_data.message,
+                    agent=agent,
+                    conversation_history=customer_context.conversation_history or [],
+                    system_prompt=enhanced_system_prompt,
+                    agent_config=agent.config or {},
+                    db_session=db,
+                    context=routing_context
+                )
+
+                # Convert to ChatResponse
+                response = ChatResponse(
+                    response=routed_response.response,
+                    conversation_id=chat_data.conversation_id or f"conv_{agent.public_id}_{int(datetime.now().timestamp())}",
+                    confidence_score=routed_response.confidence_score,
+                    sources=routed_response.sources,
+                    grounding_mode=routed_response.routing_decision,
+                    persona_applied=f"Router ({routed_response.routing_decision})",
+                    escalation_suggested=False,
+                    web_search_used=len(routed_response.tools_used) > 0,
+                    customer_context={
+                        "insights": insights_payload,
+                        "sentiment": customer_context.sentiment,
+                        "entities": customer_context.named_entities,
+                        "user_intelligence": insights_payload,
+                        "routing": {
+                            "decision": routed_response.routing_decision,
+                            "reasoning": routed_response.reasoning,
+                            "tools_used": routed_response.tools_used,
+                            "execution_time_ms": routed_response.execution_time_ms
+                        },
+                        "escalation": {"created": False, "priority": None}
+                    }
+                )
+
+                # Update customer profile
+                await customer_data_service.create_or_update_customer_profile(
+                    visitor_id=visitor_id,
+                    agent_id=agent_id,
+                    session_context=chat_data.session_context,
+                    interaction_data={
+                        "message_count": 1,
+                        "interests": customer_context.current_interests,
+                        "communication_style": customer_context.communication_style
+                    },
+                    db=db
+                )
+
+            except Exception as router_error:
+                logger.error(f"Router error: {router_error}, falling back to RAG")
+                # Fallback to standard RAG if routing fails
+                use_intelligent_routing = False
+                # Continue to else block below
+
+        if not agent.domain_expertise_enabled and not use_intelligent_routing:
             # Use enhanced customer data and intelligent fallback system
             rag_service = RAGService()
 
